@@ -18,19 +18,21 @@ uv run pytest
 uv run uvicorn {{package_name}}.main:app --reload
 ```
 
-## Docker
-
-```bash
-# Build
-docker build -t {{project_name}} .
-
-# Run
-docker run -p 8000:8000 {{project_name}}
-```
-
 ## CI/CD
 
 This repo uses [scp-ci-templates](https://github.com/Aptos-Unified-Commerce/scp-ci-templates) for CI/CD.
+
+The Dockerfile is **centrally managed** — it is generated at build time from the golden template
+in scp-ci-templates. To customize Docker behavior, edit `.ci-agent.yml`:
+
+```yaml
+docker:
+  python_version: "3.11"    # Base image Python version
+  port: 8000                # Exposed port
+  entrypoint: '["uvicorn", "{{package_name}}.main:app", "--host", "0.0.0.0", "--port", "8000"]'
+  extra_system_packages: [] # Runtime apt packages (e.g., ["libpq5"])
+  extra_build_packages: []  # Build-time apt packages (e.g., ["gcc", "libpq-dev"])
+```
 
 On every push/PR:
 - Auto-detection, test, Docker build, security scanning

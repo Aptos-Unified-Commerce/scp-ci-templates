@@ -2,7 +2,11 @@ name: "Agent: Build Docker Image & Push to ECR"
 
 # Agents are Python services that depend on framework libraries from CodeArtifact.
 # They are tested with uv, then built as Docker images and pushed to ECR.
-# During Docker build, framework dependencies are pulled from CodeArtifact.
+#
+# IMPORTANT: The Dockerfile is NOT in the agent repo. It is centrally managed
+# in scp-ci-templates/dockerfiles/agent.Dockerfile and generated at runtime.
+# To update the Docker build for ALL agents, edit the golden template.
+# Per-repo customization is done via .ci-agent.yml (entrypoint, port, etc.)
 
 on:
   workflow_call:
@@ -21,16 +25,6 @@ on:
         description: "ECR repository name for the agent image"
         required: true
         type: string
-      dockerfile-path:
-        description: "Path to Dockerfile"
-        required: false
-        type: string
-        default: "Dockerfile"
-      docker-context:
-        description: "Docker build context directory"
-        required: false
-        type: string
-        default: "."
       image-tag:
         description: "Additional image tag (besides git SHA, branch, latest)"
         required: false
@@ -123,8 +117,6 @@ jobs:
             --output text)
           echo "UV_EXTRA_INDEX_URL=https://aws:${CODEARTIFACT_TOKEN}@${CODEARTIFACT_URL#https://}simple/" >> $GITHUB_ENV
           echo "PIP_EXTRA_INDEX_URL=https://aws:${CODEARTIFACT_TOKEN}@${CODEARTIFACT_URL#https://}simple/" >> $GITHUB_ENV
-          echo "CODEARTIFACT_URL=$CODEARTIFACT_URL" >> $GITHUB_ENV
-          echo "CODEARTIFACT_TOKEN=$CODEARTIFACT_TOKEN" >> $GITHUB_ENV
 
       - name: Install dependencies (including framework libs from CodeArtifact)
         run: uv sync --all-extras
@@ -192,6 +184,14 @@ jobs:
       - name: Install CI Agent
         run: pip install .ci-templates/agent
 
+      # ---- Generate Dockerfile from golden template ----
+      - name: Generate Dockerfile
+        run: |
+          ci-agent docker-gen \
+            --template .ci-templates/dockerfiles/agent.Dockerfile \
+            --repo-path . \
+            --output Dockerfile
+
       - name: Restore build history
         if: inputs.enable-analysis
         uses: actions/cache@v4
@@ -255,14 +255,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ---- Docker build — pass CodeArtifact index so Dockerfile can pip install framework libs ----
+      # ---- Docker build using generated Dockerfile ----
       - name: Build and push agent image
         id: docker-build
         continue-on-error: true
         uses: docker/build-push-action@v6
         with:
-          context: ${{ inputs.docker-context }}
-          file: ${{ inputs.dockerfile-path }}
+          context: .
+          file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
@@ -285,8 +285,8 @@ jobs:
         if: steps.heal-docker.outcome == 'success' && steps.heal-docker.outputs.should-retry == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ${{ inputs.docker-context }}
-          file: ${{ inputs.dockerfile-path }}
+          context: .
+          file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           no-cache: true
@@ -330,6 +330,7 @@ jobs:
           if [ "$STATUS" != "failure" ]; then
             echo "- **Image:** ${{ steps.meta.outputs.primary-image }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Dockerfile:** Generated from scp-ci-templates golden template" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Fail if not healed

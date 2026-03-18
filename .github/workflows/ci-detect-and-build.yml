@@ -39,16 +39,6 @@ on:
         required: false
         type: string
         default: ""
-      dockerfile-path:
-        description: "Path to Dockerfile"
-        required: false
-        type: string
-        default: "Dockerfile"
-      docker-context:
-        description: "Docker build context directory"
-        required: false
-        type: string
-        default: "."
       enable-healing:
         description: "Enable self-healing on build failures"
         required: false
@@ -179,8 +169,6 @@ jobs:
       python-version: ${{ inputs.python-version }}
       aws-region: ${{ inputs.aws-region }}
       ecr-repository: ${{ inputs.ecr-repository }}
-      dockerfile-path: ${{ inputs.dockerfile-path }}
-      docker-context: ${{ inputs.docker-context }}
       codeartifact-domain: ${{ inputs.codeartifact-domain }}
       codeartifact-repo: ${{ inputs.codeartifact-repo }}
       codeartifact-owner: ${{ inputs.codeartifact-owner }}

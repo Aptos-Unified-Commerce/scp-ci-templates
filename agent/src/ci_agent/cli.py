@@ -155,6 +155,29 @@ def cmd_security(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_docker_gen(args: argparse.Namespace) -> None:
+    """Generate Dockerfile from golden template + repo config."""
+    from ci_agent.docker.generator import generate_dockerfile
+
+    from pathlib import Path
+
+    template_path = Path(args.template)
+    repo_path = Path(args.repo_path)
+    output_path = Path(args.output)
+
+    dockerfile = generate_dockerfile(template_path, repo_path, output_path)
+
+    print(f"Generated Dockerfile → {output_path}")
+    _write_github_output("dockerfile-path", str(output_path))
+
+    summary = "### Dockerfile Generated\n\n"
+    summary += f"**Template:** `{template_path}`\n"
+    summary += f"**Output:** `{output_path}`\n\n"
+    summary += "<details><summary>Generated Dockerfile</summary>\n\n"
+    summary += f"```dockerfile\n{dockerfile}\n```\n\n</details>"
+    _write_step_summary(summary)
+
+
 def cmd_record(args: argparse.Namespace) -> None:
     """Record a build result to history."""
     from ci_agent.analyze.history import BuildHistory
@@ -213,6 +236,13 @@ def main() -> None:
     p_security.add_argument("--image", default=None, help="Docker image to scan (for agent repos)")
     p_security.add_argument("--fail-on-high", action="store_true", help="Exit non-zero on critical/high findings")
     p_security.set_defaults(func=cmd_security)
+
+    # docker-gen
+    p_docker = subparsers.add_parser("docker-gen", help="Generate Dockerfile from golden template")
+    p_docker.add_argument("--template", required=True, help="Path to golden Dockerfile template")
+    p_docker.add_argument("--repo-path", default=".", help="Path to the caller repo root")
+    p_docker.add_argument("--output", default="Dockerfile", help="Output path for generated Dockerfile")
+    p_docker.set_defaults(func=cmd_docker_gen)
 
     # record
     p_record = subparsers.add_parser("record", help="Record a build result to history")
