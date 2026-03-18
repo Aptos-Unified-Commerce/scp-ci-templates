@@ -1,0 +1,108 @@
+name: Detect & Build
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version to use"
+        required: false
+        type: string
+        default: "3.11"
+      aws-region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "us-east-1"
+      # --- CodeArtifact inputs (used when no Dockerfile) ---
+      package-name:
+        description: "Python package name for artifact upload"
+        required: true
+        type: string
+      codeartifact-domain:
+        description: "CodeArtifact domain name"
+        required: true
+        type: string
+      codeartifact-repo:
+        description: "CodeArtifact repository name"
+        required: true
+        type: string
+      codeartifact-owner:
+        description: "AWS account ID (CodeArtifact domain owner)"
+        required: true
+        type: string
+      # --- ECR inputs (used when Dockerfile exists) ---
+      ecr-repository:
+        description: "ECR repository name (required if repo has a Dockerfile)"
+        required: false
+        type: string
+        default: ""
+      dockerfile-path:
+        description: "Path to Dockerfile"
+        required: false
+        type: string
+        default: "Dockerfile"
+      docker-context:
+        description: "Docker build context directory"
+        required: false
+        type: string
+        default: "."
+    secrets:
+      AWS_ROLE_ARN:
+        description: "IAM role ARN with CodeArtifact and/or ECR permissions"
+        required: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has-dockerfile: ${{ steps.check.outputs.has-dockerfile }}
+      build-type: ${{ steps.check.outputs.build-type }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect build type
+        id: check
+        run: |
+          if [ -f "${{ inputs.dockerfile-path }}" ]; then
+            echo "has-dockerfile=true" >> "$GITHUB_OUTPUT"
+            echo "build-type=docker" >> "$GITHUB_OUTPUT"
+            echo "### Build Type: Docker (ECR)" >> $GITHUB_STEP_SUMMARY
+            echo "Detected \`${{ inputs.dockerfile-path }}\` — will build Docker image and push to ECR." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "has-dockerfile=false" >> "$GITHUB_OUTPUT"
+            echo "build-type=python" >> "$GITHUB_OUTPUT"
+            echo "### Build Type: Python Library (CodeArtifact)" >> $GITHUB_STEP_SUMMARY
+            echo "No Dockerfile found — will build Python package and publish to CodeArtifact." >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ---- Python library path: build, test, publish to CodeArtifact ----
+  python-build:
+    needs: detect
+    if: needs.detect.outputs.has-dockerfile == 'false'
+    uses: ./.github/workflows/ci-python.yml
+    with:
+      python-version: ${{ inputs.python-version }}
+      package-name: ${{ inputs.package-name }}
+      aws-region: ${{ inputs.aws-region }}
+      codeartifact-domain: ${{ inputs.codeartifact-domain }}
+      codeartifact-repo: ${{ inputs.codeartifact-repo }}
+      codeartifact-owner: ${{ inputs.codeartifact-owner }}
+      publish: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+
+  # ---- Docker path: build, test, push to ECR ----
+  docker-build:
+    needs: detect
+    if: needs.detect.outputs.has-dockerfile == 'true'
+    uses: ./.github/workflows/ci-docker.yml
+    with:
+      python-version: ${{ inputs.python-version }}
+      aws-region: ${{ inputs.aws-region }}
+      ecr-repository: ${{ inputs.ecr-repository }}
+      dockerfile-path: ${{ inputs.dockerfile-path }}
+      docker-context: ${{ inputs.docker-context }}
+      run-tests: true
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}

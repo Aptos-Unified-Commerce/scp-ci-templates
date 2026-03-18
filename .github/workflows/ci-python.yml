@@ -1,0 +1,136 @@
+name: Python Build & Publish
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version to use"
+        required: false
+        type: string
+        default: "3.11"
+      package-name:
+        description: "Package name for the artifact upload"
+        required: true
+        type: string
+      aws-region:
+        description: "AWS region for CodeArtifact"
+        required: false
+        type: string
+        default: "us-east-1"
+      codeartifact-domain:
+        description: "CodeArtifact domain name"
+        required: true
+        type: string
+      codeartifact-repo:
+        description: "CodeArtifact repository name"
+        required: true
+        type: string
+      codeartifact-owner:
+        description: "AWS account ID (CodeArtifact domain owner)"
+        required: true
+        type: string
+      publish:
+        description: "Whether to publish to CodeArtifact"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AWS_ROLE_ARN:
+        description: "IAM role ARN with CodeArtifact permissions"
+        required: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install ${{ inputs.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build package
+        run: uv build
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep -m1 'version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package-name }}
+          path: dist/
+
+  publish:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: inputs.publish
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install ${{ inputs.python-version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Get CodeArtifact auth token
+        run: |
+          CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain ${{ inputs.codeartifact-domain }} \
+            --domain-owner ${{ inputs.codeartifact-owner }} \
+            --query authorizationToken \
+            --output text)
+          echo "CODEARTIFACT_AUTH_TOKEN=$CODEARTIFACT_AUTH_TOKEN" >> $GITHUB_ENV
+
+      - name: Get CodeArtifact repository URL
+        run: |
+          CODEARTIFACT_URL=$(aws codeartifact get-repository-endpoint \
+            --domain ${{ inputs.codeartifact-domain }} \
+            --domain-owner ${{ inputs.codeartifact-owner }} \
+            --repository ${{ inputs.codeartifact-repo }} \
+            --format pypi \
+            --query repositoryEndpoint \
+            --output text)
+          echo "CODEARTIFACT_URL=$CODEARTIFACT_URL" >> $GITHUB_ENV
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to CodeArtifact
+        run: |
+          uv publish \
+            --publish-url "${CODEARTIFACT_URL}" \
+            --token "aws:${CODEARTIFACT_AUTH_TOKEN}"
+
+      - name: Summary
+        run: |
+          echo "### Published to CodeArtifact" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package:** ${{ inputs.package-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ needs.build-and-test.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** ${{ inputs.codeartifact-domain }}/${{ inputs.codeartifact-repo }}" >> $GITHUB_STEP_SUMMARY

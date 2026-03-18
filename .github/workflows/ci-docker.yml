@@ -1,0 +1,132 @@
+name: Docker Build & Push to ECR
+
+on:
+  workflow_call:
+    inputs:
+      aws-region:
+        description: "AWS region for ECR"
+        required: false
+        type: string
+        default: "us-east-1"
+      ecr-repository:
+        description: "ECR repository name"
+        required: true
+        type: string
+      dockerfile-path:
+        description: "Path to Dockerfile"
+        required: false
+        type: string
+        default: "Dockerfile"
+      docker-context:
+        description: "Docker build context directory"
+        required: false
+        type: string
+        default: "."
+      image-tag:
+        description: "Additional image tag (besides git SHA and latest)"
+        required: false
+        type: string
+        default: ""
+      python-version:
+        description: "Python version for pre-build testing"
+        required: false
+        type: string
+        default: "3.11"
+      run-tests:
+        description: "Whether to run uv tests before Docker build"
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      AWS_ROLE_ARN:
+        description: "IAM role ARN with ECR permissions"
+        required: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: inputs.run-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install ${{ inputs.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run tests
+        run: uv run pytest
+
+  docker-build-push:
+    needs: test
+    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      image-uri: ${{ steps.build-push.outputs.image-uri }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          REGISTRY=${{ steps.ecr-login.outputs.registry }}
+          REPO=${{ inputs.ecr-repository }}
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          BRANCH=$(echo "${GITHUB_REF_NAME}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+
+          # Build tag list
+          TAGS="${REGISTRY}/${REPO}:${SHA_SHORT}"
+          TAGS="${TAGS},${REGISTRY}/${REPO}:${BRANCH}"
+
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${REGISTRY}/${REPO}:latest"
+          fi
+
+          if [ -n "${{ inputs.image-tag }}" ]; then
+            TAGS="${TAGS},${REGISTRY}/${REPO}:${{ inputs.image-tag }}"
+          fi
+
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "primary-image=${REGISTRY}/${REPO}:${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        id: build-push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.docker-context }}
+          file: ${{ inputs.dockerfile-path }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Docker Image Pushed to ECR" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** ${{ inputs.ecr-repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ steps.meta.outputs.primary-image }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY

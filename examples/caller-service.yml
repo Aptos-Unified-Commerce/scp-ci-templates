@@ -1,0 +1,22 @@
+# Example: .github/workflows/ci.yml for a Dockerized service repo (has Dockerfile)
+# Copy this file to your repo's .github/workflows/ci.yml and update the values.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    uses: Aptos-Unified-Commerce/scp-ci-templates/.github/workflows/ci-detect-and-build.yml@main
+    with:
+      package-name: my_service                 # ← your package name
+      ecr-repository: my-service               # ← your ECR repository name
+      codeartifact-domain: your-domain         # ← your CodeArtifact domain (still needed for detect workflow)
+      codeartifact-repo: your-repo             # ← your CodeArtifact repository
+      codeartifact-owner: "123456789012"       # ← your AWS account ID
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
