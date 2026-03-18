@@ -106,6 +106,55 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     _write_step_summary(report.to_markdown())
 
 
+def cmd_version(args: argparse.Namespace) -> None:
+    """Compute next semantic version from conventional commits."""
+    from ci_agent.version.versioner import apply_version, compute_next_version, generate_changelog
+
+    info = compute_next_version(args.repo_path)
+    result = info.to_dict()
+
+    print(json.dumps(result, indent=2))
+
+    _write_github_output("current-version", info.current)
+    _write_github_output("new-version", info.new)
+    _write_github_output("bump-type", info.bump_type)
+
+    if args.apply and info.bump_type != "none":
+        modified = apply_version(args.repo_path, info.new)
+        result["files_modified"] = modified
+        _write_github_output("files-modified", ",".join(modified))
+
+    changelog = generate_changelog(info)
+    _write_github_output("changelog", changelog)
+
+    summary = f"### Version: {info.current} → {info.new} ({info.bump_type})\n\n"
+    summary += f"**Commits analyzed:** {info.commits_analyzed}\n\n"
+    summary += changelog
+    _write_step_summary(summary)
+
+
+def cmd_security(args: argparse.Namespace) -> None:
+    """Run security scans on the repository."""
+    from ci_agent.security.scanner import SecurityScanner
+
+    scanner = SecurityScanner(repo_path=args.repo_path, image=args.image)
+    report = scanner.scan_all()
+
+    print(report.to_json())
+
+    _write_github_output("security-report", report.to_json())
+    _write_github_output("total-findings", str(report.total))
+    _write_github_output("has-critical", str(report.has_critical).lower())
+    _write_github_output("has-high", str(report.has_high).lower())
+    _write_step_summary(report.to_markdown())
+
+    # Exit non-zero if critical or high findings and --fail-on-high is set
+    if args.fail_on_high and (report.has_critical or report.has_high):
+        print(f"\n::error::Security scan found {report.summary.get('critical', 0)} critical "
+              f"and {report.summary.get('high', 0)} high severity issues")
+        sys.exit(1)
+
+
 def cmd_record(args: argparse.Namespace) -> None:
     """Record a build result to history."""
     from ci_agent.analyze.history import BuildHistory
@@ -151,6 +200,19 @@ def main() -> None:
     p_analyze = subparsers.add_parser("analyze", help="Analyze build history and generate report")
     p_analyze.add_argument("--history-file", default="build_history.json", help="Path to history file")
     p_analyze.set_defaults(func=cmd_analyze)
+
+    # version
+    p_version = subparsers.add_parser("version", help="Compute next semantic version from commits")
+    p_version.add_argument("--repo-path", default=".", help="Path to the repository root")
+    p_version.add_argument("--apply", action="store_true", help="Apply version to project files")
+    p_version.set_defaults(func=cmd_version)
+
+    # security
+    p_security = subparsers.add_parser("security", help="Run security scans")
+    p_security.add_argument("--repo-path", default=".", help="Path to the repository root")
+    p_security.add_argument("--image", default=None, help="Docker image to scan (for agent repos)")
+    p_security.add_argument("--fail-on-high", action="store_true", help="Exit non-zero on critical/high findings")
+    p_security.set_defaults(func=cmd_security)
 
     # record
     p_record = subparsers.add_parser("record", help="Record a build result to history")

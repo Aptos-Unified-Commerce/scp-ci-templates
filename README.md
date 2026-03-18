@@ -131,14 +131,47 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0"]
 
 Up to **2 healing attempts** per build.
 
-### 3. Build Analytics
+### 3. Semantic Versioning
+
+Automatic version bumping based on [Conventional Commits](https://www.conventionalcommits.org/):
+
+| Commit Prefix | Bump Type | Example |
+|--------------|-----------|---------|
+| `feat!:` / `BREAKING CHANGE:` | **major** | `feat!: remove legacy API` |
+| `feat:` | **minor** | `feat: add auth module` |
+| `fix:` / `chore:` / `docs:` / anything else | **patch** | `fix: handle null response` |
+
+On push to `main`: version is computed → build runs → git tag `v{version}` is created automatically.
+
+### 4. Security Scanning
+
+Integrated security scans run **in parallel** with builds on every CI run:
+
+| Tool | What it scans | Category |
+|------|-------------|----------|
+| **pip-audit** | Python dependencies against OSV database | Vulnerabilities |
+| **bandit** | Python source code (SAST) | Code security |
+| **trivy** | Filesystem + Docker images | Vulnerabilities, secrets, misconfig |
+| **hadolint** | Dockerfile best practices | Dockerfile linting |
+| **gitleaks** | Code + git history for leaked secrets | Secret detection |
+
+Results are:
+- Aggregated into a unified report in GitHub Step Summary
+- Uploaded as SARIF to GitHub Security tab
+- Saved as a build artifact
+
+Set `fail-on-high-severity: true` to block builds with critical/high findings.
+
+**Snyk migration path:** When ready, add `SNYK_TOKEN` secret and the agent will use Snyk in place of pip-audit and trivy.
+
+### 5. Build Analytics
 
 - Tracks last 200 builds per branch
 - Failure rate, build time trends, flaky test detection
 - Healing effectiveness tracking
 - Optimization recommendations
 
-### 4. AI Analysis (Optional)
+### 6. AI Analysis (Optional)
 
 When `ANTHROPIC_API_KEY` is set → Claude analyzes failures and suggests fixes.
 
@@ -152,16 +185,19 @@ scp-ci-templates/
 │   ├── ci-detect-and-build.yml      # Router: detects role, routes to framework or agent
 │   ├── ci-framework.yml             # Framework: uv build → CodeArtifact
 │   ├── ci-agent-service.yml         # Agent: docker build → ECR (pulls from CodeArtifact)
+│   ├── ci-security.yml              # Security scanning (pip-audit, bandit, trivy, gitleaks)
 │   └── ci-agent-analyze.yml         # Scheduled build analytics
 ├── agent/                           # Python CI Agent package
 │   ├── src/ci_agent/
-│   │   ├── cli.py                   # ci-agent detect|heal|analyze|record
+│   │   ├── cli.py                   # ci-agent detect|heal|analyze|version|security|record
 │   │   ├── models.py               # BuildPlan, HealingAction, BuildRecord
 │   │   ├── detect/                  # Detection: role, type, frameworks, security
 │   │   ├── heal/                    # Self-healing: strategies, auto-fix PRs
 │   │   ├── analyze/                 # Analytics: history, insights, optimizer
+│   │   ├── version/                 # Semantic versioning from conventional commits
+│   │   ├── security/                # Security scanning orchestrator (5 tools)
 │   │   └── llm/                     # Optional Claude-powered analysis
-│   └── tests/                       # 24 unit tests
+│   └── tests/                       # 44 unit tests
 ├── examples/
 │   ├── caller-library.yml           # Example for framework repos
 │   └── caller-service.yml           # Example for agent repos
@@ -197,6 +233,15 @@ pip install ./agent
 
 # Detect repo role and generate build plan
 ci-agent detect --repo-path /path/to/repo
+
+# Compute next semantic version from conventional commits
+ci-agent version --repo-path /path/to/repo
+ci-agent version --repo-path /path/to/repo --apply   # Also update pyproject.toml
+
+# Run security scans (uses all available tools)
+ci-agent security --repo-path /path/to/repo
+ci-agent security --repo-path /path/to/repo --image my-image:latest  # + Docker image scan
+ci-agent security --repo-path /path/to/repo --fail-on-high           # Exit 1 on critical/high
 
 # Diagnose a build failure
 ci-agent heal --log-file /tmp/build.log --attempt 1

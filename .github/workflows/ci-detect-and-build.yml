@@ -3,6 +3,7 @@ name: Detect & Build (Autonomous)
 # Autonomous router that detects the repo role and routes to the right pipeline:
 #   - Framework (library) → ci-framework.yml → test + uv build → CodeArtifact
 #   - Agent (service)     → ci-agent-service.yml → test + docker build → ECR
+# Also runs: security scanning + semantic versioning on all repos.
 
 on:
   workflow_call:
@@ -58,16 +59,31 @@ on:
         required: false
         type: boolean
         default: true
+      enable-security:
+        description: "Enable security scanning"
+        required: false
+        type: boolean
+        default: true
+      fail-on-high-severity:
+        description: "Fail build on critical/high security findings"
+        required: false
+        type: boolean
+        default: false
+      enable-versioning:
+        description: "Enable automatic semantic versioning"
+        required: false
+        type: boolean
+        default: true
     secrets:
       AWS_ROLE_ARN:
         description: "IAM role ARN with CodeArtifact and/or ECR permissions"
         required: true
       ANTHROPIC_API_KEY:
-        description: "Optional: Claude API key for AI-powered failure analysis"
+        description: "Optional: Claude API key for AI-powered analysis"
         required: false
 
 jobs:
-  # ---- Phase 1: Autonomous Detection ----
+  # ---- Phase 1: Detection + Versioning ----
   detect:
     runs-on: ubuntu-latest
     outputs:
@@ -77,10 +93,14 @@ jobs:
       has-dockerfile: ${{ steps.detect.outputs.has-dockerfile }}
       suggested-workflow: ${{ steps.detect.outputs.suggested-workflow }}
       confidence: ${{ steps.detect.outputs.confidence }}
+      new-version: ${{ steps.version.outputs.new-version }}
+      bump-type: ${{ steps.version.outputs.bump-type }}
 
     steps:
       - name: Checkout caller repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for versioning
 
       - name: Checkout CI templates (for agent)
         uses: actions/checkout@v4
@@ -100,6 +120,11 @@ jobs:
         id: detect
         run: ci-agent detect --repo-path .
 
+      - name: Compute version
+        id: version
+        if: inputs.enable-versioning
+        run: ci-agent version --repo-path .
+
       - name: Detection summary
         run: |
           echo "### CI Agent Detection Results" >> $GITHUB_STEP_SUMMARY
@@ -112,8 +137,21 @@ jobs:
           echo "| Has Dockerfile | ${{ steps.detect.outputs.has-dockerfile }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Workflow | \`${{ steps.detect.outputs.suggested-workflow }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Confidence | ${{ steps.detect.outputs.confidence }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ steps.version.outputs.current-version }}\` → \`${{ steps.version.outputs.new-version }}\` (${{ steps.version.outputs.bump-type }}) |" >> $GITHUB_STEP_SUMMARY
 
-  # ---- Framework path: library → test + uv build → CodeArtifact ----
+  # ---- Phase 2: Security Scan (parallel with build) ----
+  security:
+    needs: detect
+    if: inputs.enable-security
+    uses: ./.github/workflows/ci-security.yml
+    with:
+      repo-role: ${{ needs.detect.outputs.repo-role }}
+      python-version: ${{ inputs.python-version }}
+      fail-on-high: ${{ inputs.fail-on-high-severity }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  # ---- Phase 3a: Framework path ----
   framework-build:
     needs: detect
     if: needs.detect.outputs.repo-role == 'framework'
@@ -132,7 +170,7 @@ jobs:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-  # ---- Agent path: service → test + docker build → ECR ----
+  # ---- Phase 3b: Agent path ----
   agent-build:
     needs: detect
     if: needs.detect.outputs.repo-role == 'agent'
@@ -152,3 +190,89 @@ jobs:
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  # ---- Phase 4: Update version file + tag (only on main, after successful build) ----
+  version-and-tag:
+    needs: [detect, framework-build, agent-build, security]
+    if: |
+      always() &&
+      inputs.enable-versioning &&
+      needs.detect.outputs.bump-type != 'none' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      (needs.framework-build.result == 'success' || needs.agent-build.result == 'success') &&
+      (needs.security.result == 'success' || needs.security.result == 'skipped')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Checkout CI templates
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+          path: .ci-templates
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CI Agent
+        run: pip install .ci-templates/agent
+
+      - name: Configure git
+        run: |
+          git config user.name "CI Agent"
+          git config user.email "ci-agent@aptos-unified-commerce.github.io"
+
+      - name: Update version in project files
+        id: apply
+        run: |
+          VERSION="${{ needs.detect.outputs.new-version }}"
+          echo "Applying version ${VERSION} to project files..."
+          ci-agent version --repo-path . --apply
+
+      - name: Commit version bump
+        run: |
+          VERSION="${{ needs.detect.outputs.new-version }}"
+          BUMP="${{ needs.detect.outputs.bump-type }}"
+
+          # Stage any version file changes (pyproject.toml, package.json)
+          git add pyproject.toml package.json 2>/dev/null || true
+
+          # Only commit if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No version file changes to commit"
+          else
+            git commit -m "chore(release): bump version to ${VERSION} [skip ci]"
+            git push origin main
+            echo "Committed version bump to ${VERSION}"
+          fi
+
+      - name: Create and push version tag
+        run: |
+          VERSION="${{ needs.detect.outputs.new-version }}"
+          BUMP="${{ needs.detect.outputs.bump-type }}"
+          echo "Tagging v${VERSION}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION} (${BUMP} bump)"
+          git push origin "v${VERSION}"
+
+      - name: Summary
+        run: |
+          VERSION="${{ needs.detect.outputs.new-version }}"
+          BUMP="${{ needs.detect.outputs.bump-type }}"
+          echo "### Version Released" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tag** | \`v${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Bump** | ${BUMP} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **pyproject.toml** | synced |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,132 @@
+name: Security Scan
+
+# Runs security scans on any repo — works for both frameworks and agents.
+# Tools: pip-audit, bandit, trivy, hadolint, gitleaks
+# Future: Snyk will replace pip-audit and trivy.
+
+on:
+  workflow_call:
+    inputs:
+      repo-role:
+        description: "Repo role: framework or agent"
+        required: false
+        type: string
+        default: ""
+      python-version:
+        description: "Python version"
+        required: false
+        type: string
+        default: "3.11"
+      docker-image:
+        description: "Docker image to scan (for agent repos, after build)"
+        required: false
+        type: string
+        default: ""
+      fail-on-high:
+        description: "Fail the workflow if critical or high severity issues found"
+        required: false
+        type: boolean
+        default: false
+      # --- Future Snyk integration ---
+      # snyk-org:
+      #   description: "Snyk organization ID"
+      #   required: false
+      #   type: string
+      #   default: ""
+    secrets:
+      # SNYK_TOKEN:
+      #   description: "Snyk API token (when ready to migrate)"
+      #   required: false
+      ANTHROPIC_API_KEY:
+        description: "Optional: AI-powered security analysis"
+        required: false
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write  # For uploading SARIF results
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for gitleaks
+
+      - name: Checkout CI templates
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+          path: .ci-templates
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install CI Agent and security tools
+        run: |
+          pip install .ci-templates/agent
+          pip install pip-audit bandit
+
+      - name: Install trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
+
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep -o '"tag_name": "v[^"]*"' | head -1 | grep -o '[0-9.]*')
+          wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_amd64.tar.gz"
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_amd64.tar.gz"
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Install hadolint
+        if: hashFiles('Dockerfile') != ''
+        run: |
+          wget -q -O /usr/local/bin/hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          chmod +x /usr/local/bin/hadolint
+
+      # ---- Run all scans via CI Agent ----
+      - name: Run security scans
+        id: scan
+        run: |
+          ARGS="--repo-path ."
+          if [ -n "${{ inputs.docker-image }}" ]; then
+            ARGS="$ARGS --image ${{ inputs.docker-image }}"
+          fi
+          if [ "${{ inputs.fail-on-high }}" = "true" ]; then
+            ARGS="$ARGS --fail-on-high"
+          fi
+          ci-agent security $ARGS
+
+      # ---- Generate SARIF for GitHub Security tab (trivy) ----
+      - name: Trivy SARIF output
+        if: always()
+        continue-on-error: true
+        run: |
+          trivy fs --format sarif --output trivy-results.sarif \
+            --severity CRITICAL,HIGH,MEDIUM . || true
+
+      - name: Upload SARIF to GitHub Security
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+
+      # ---- Upload scan report as artifact ----
+      - name: Save security report
+        if: always()
+        run: |
+          ci-agent security --repo-path . > security-report.json 2>/dev/null || true
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.json
