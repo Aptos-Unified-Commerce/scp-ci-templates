@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from ci_agent.detect.deploy_target import detect_deploy_target
+from ci_agent.detect.deploy_target import detect_repo_role
 from ci_agent.detect.framework import detect_frameworks
 from ci_agent.detect.project_type import (
     detect_go_version,
@@ -18,18 +18,14 @@ from ci_agent.detect.security import run_security_checks
 from ci_agent.detect.test_tools import detect_test_tool
 from ci_agent.models import BuildPlan
 
-WORKFLOW_MAP = {
-    "python": "ci-python",
-    "node": "ci-node",
-    "go": "ci-go",
-    "rust": "ci-rust",
-    "java": "ci-java",
-    "docker-only": "ci-docker",
-}
-
 
 class Detector:
-    """Scans a repository and produces a BuildPlan."""
+    """Scans a repository and produces a BuildPlan.
+
+    Classification:
+        - Framework: Python library → test + uv build → publish to CodeArtifact
+        - Agent: Python service with Dockerfile → test + docker build → push to ECR
+    """
 
     def __init__(self, repo_path: str = ".") -> None:
         self.repo_path = Path(repo_path).resolve()
@@ -44,20 +40,16 @@ class Detector:
         primary_type, all_types = detect_project_type(self.repo_path)
         frameworks = detect_frameworks(self.repo_path, primary_type)
         test_tool = detect_test_tool(self.repo_path, primary_type)
-        deploy_target = detect_deploy_target(self.repo_path, primary_type, has_dockerfile)
+        repo_role, deploy_target = detect_repo_role(self.repo_path, has_dockerfile)
         security_warnings = run_security_checks(self.repo_path)
 
-        # Determine suggested workflow
-        if has_dockerfile and primary_type != "docker-only":
-            # Has both code and Dockerfile — Docker build is primary
-            suggested_workflow = "ci-docker"
-        else:
-            suggested_workflow = WORKFLOW_MAP.get(primary_type, "ci-python")
+        # Map role to workflow
+        suggested_workflow = "ci-agent-service" if repo_role == "agent" else "ci-framework"
 
-        # Calculate confidence
         confidence = self._calculate_confidence(primary_type, frameworks, test_tool)
 
         return BuildPlan(
+            repo_role=repo_role,
             project_type=primary_type,
             frameworks=frameworks,
             test_tool=test_tool,
@@ -83,18 +75,21 @@ class Detector:
                 return None
 
             has_dockerfile = (self.repo_path / config.get("dockerfile_path", "Dockerfile")).exists()
+            repo_role = config.get("repo_role", "agent" if has_dockerfile else "framework")
 
             return BuildPlan(
-                project_type=config.get("project_type", "unknown"),
+                repo_role=repo_role,
+                project_type=config.get("project_type", "python"),
                 frameworks=config.get("frameworks", []),
                 test_tool=config.get("test_tool"),
-                deploy_target=config.get("deploy_target", "codeartifact"),
+                deploy_target="ecr" if repo_role == "agent" else "codeartifact",
                 has_dockerfile=has_dockerfile,
                 python_version=config.get("python_version"),
                 node_version=config.get("node_version"),
                 go_version=config.get("go_version"),
                 security_warnings=[],
-                suggested_workflow=config.get("suggested_workflow", "ci-python"),
+                suggested_workflow=config.get("suggested_workflow",
+                    "ci-agent-service" if repo_role == "agent" else "ci-framework"),
                 confidence=1.0,
             )
         except Exception:
@@ -113,12 +108,12 @@ class Detector:
         score = 0.5  # Base: we found a project type
 
         if frameworks:
-            score += 0.2  # We identified specific frameworks
+            score += 0.2
 
         if test_tool:
-            score += 0.15  # We know how to test it
+            score += 0.15
 
         if (self.repo_path / "pyproject.toml").exists() or (self.repo_path / "package.json").exists():
-            score += 0.15  # Strong project metadata file
+            score += 0.15
 
         return min(score, 1.0)

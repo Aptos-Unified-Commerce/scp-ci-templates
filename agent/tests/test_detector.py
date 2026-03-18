@@ -1,8 +1,6 @@
 """Tests for the detection module."""
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -11,12 +9,12 @@ from ci_agent.detect.detector import Detector
 
 
 @pytest.fixture
-def python_repo(tmp_path):
-    """Create a minimal Python project."""
+def framework_repo(tmp_path):
+    """A framework repo: Python library, no Dockerfile → CodeArtifact."""
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "test"\nversion = "0.1.0"\n'
+        '[project]\nname = "scp-ai-platform"\nversion = "0.1.0"\n'
         'requires-python = ">=3.11"\n'
-        'dependencies = ["fastapi", "boto3"]\n\n'
+        'dependencies = ["langchain", "boto3"]\n\n'
         "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n"
     )
     (tmp_path / "src").mkdir()
@@ -25,20 +23,27 @@ def python_repo(tmp_path):
 
 
 @pytest.fixture
-def docker_repo(tmp_path):
-    """Create a project with a Dockerfile."""
+def agent_repo(tmp_path):
+    """An agent repo: Python service with Dockerfile → ECR."""
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "test-svc"\nversion = "0.1.0"\n'
-        'dependencies = ["flask"]\n'
+        '[project]\nname = "scp-agent-test-runner"\nversion = "0.1.0"\n'
+        'dependencies = ["fastapi", "scp-ai-platform"]\n'
     )
-    (tmp_path / "Dockerfile").write_text("FROM python:3.11\nCOPY . .\n")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.11-slim\n"
+        "ARG PIP_EXTRA_INDEX_URL\n"
+        "COPY . .\n"
+        "RUN pip install -r requirements.txt\n"
+        "CMD [\"uvicorn\", \"main:app\"]\n"
+    )
     (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
     return tmp_path
 
 
 @pytest.fixture
 def node_repo(tmp_path):
-    """Create a Node.js project."""
+    """A Node.js project (no Dockerfile → framework)."""
     (tmp_path / "package.json").write_text(
         json.dumps(
             {
@@ -52,35 +57,41 @@ def node_repo(tmp_path):
     return tmp_path
 
 
-def test_detect_python_project(python_repo):
-    detector = Detector(repo_path=str(python_repo))
+def test_detect_framework_repo(framework_repo):
+    """Python library without Dockerfile → framework → CodeArtifact."""
+    detector = Detector(repo_path=str(framework_repo))
     plan = detector.detect()
 
+    assert plan.repo_role == "framework"
     assert plan.project_type == "python"
     assert plan.has_dockerfile is False
     assert plan.deploy_target == "codeartifact"
-    assert plan.suggested_workflow == "ci-python"
+    assert plan.suggested_workflow == "ci-framework"
     assert plan.test_tool == "pytest"
-    assert "fastapi" in plan.frameworks
+    assert "langchain" in plan.frameworks
     assert plan.python_version == ">=3.11"
     assert plan.confidence > 0.5
 
 
-def test_detect_docker_project(docker_repo):
-    detector = Detector(repo_path=str(docker_repo))
+def test_detect_agent_repo(agent_repo):
+    """Python service with Dockerfile → agent → ECR."""
+    detector = Detector(repo_path=str(agent_repo))
     plan = detector.detect()
 
+    assert plan.repo_role == "agent"
     assert plan.project_type == "python"
     assert plan.has_dockerfile is True
     assert plan.deploy_target == "ecr"
-    assert plan.suggested_workflow == "ci-docker"
-    assert "flask" in plan.frameworks
+    assert plan.suggested_workflow == "ci-agent-service"
+    assert "fastapi" in plan.frameworks
 
 
-def test_detect_node_project(node_repo):
+def test_detect_node_framework(node_repo):
+    """Node.js project without Dockerfile → framework."""
     detector = Detector(repo_path=str(node_repo))
     plan = detector.detect()
 
+    assert plan.repo_role == "framework"
     assert plan.project_type == "node"
     assert plan.has_dockerfile is False
     assert plan.test_tool == "jest"
@@ -95,19 +106,34 @@ def test_detect_unknown_project(tmp_path):
     assert plan.confidence == 0.0
 
 
-def test_config_override(tmp_path):
+def test_config_override_as_agent(tmp_path):
+    """Override detection to force agent role."""
     (tmp_path / ".ci-agent.yml").write_text(
+        "repo_role: agent\n"
         "project_type: python\n"
-        "deploy_target: lambda\n"
-        "suggested_workflow: ci-python\n"
         "frameworks:\n  - fastapi\n"
     )
     detector = Detector(repo_path=str(tmp_path))
     plan = detector.detect()
 
-    assert plan.project_type == "python"
-    assert plan.deploy_target == "lambda"
+    assert plan.repo_role == "agent"
+    assert plan.deploy_target == "ecr"
+    assert plan.suggested_workflow == "ci-agent-service"
     assert plan.confidence == 1.0
+
+
+def test_config_override_as_framework(tmp_path):
+    """Override detection to force framework role."""
+    (tmp_path / ".ci-agent.yml").write_text(
+        "repo_role: framework\n"
+        "project_type: python\n"
+    )
+    detector = Detector(repo_path=str(tmp_path))
+    plan = detector.detect()
+
+    assert plan.repo_role == "framework"
+    assert plan.deploy_target == "codeartifact"
+    assert plan.suggested_workflow == "ci-framework"
 
 
 def test_security_detects_env_file(tmp_path):

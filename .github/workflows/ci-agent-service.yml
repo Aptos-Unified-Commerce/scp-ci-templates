@@ -1,15 +1,24 @@
-name: Docker Build & Push to ECR (with Self-Healing)
+name: "Agent: Build Docker Image & Push to ECR"
+
+# Agents are Python services that depend on framework libraries from CodeArtifact.
+# They are tested with uv, then built as Docker images and pushed to ECR.
+# During Docker build, framework dependencies are pulled from CodeArtifact.
 
 on:
   workflow_call:
     inputs:
+      python-version:
+        description: "Python version for testing"
+        required: false
+        type: string
+        default: "3.11"
       aws-region:
-        description: "AWS region for ECR"
+        description: "AWS region for ECR and CodeArtifact"
         required: false
         type: string
         default: "us-east-1"
       ecr-repository:
-        description: "ECR repository name"
+        description: "ECR repository name for the agent image"
         required: true
         type: string
       dockerfile-path:
@@ -23,17 +32,26 @@ on:
         type: string
         default: "."
       image-tag:
-        description: "Additional image tag (besides git SHA and latest)"
+        description: "Additional image tag (besides git SHA, branch, latest)"
         required: false
         type: string
         default: ""
-      python-version:
-        description: "Python version for pre-build testing"
-        required: false
+      # --- CodeArtifact (for pulling framework dependencies during docker build) ---
+      codeartifact-domain:
+        description: "CodeArtifact domain (for pulling framework libs)"
+        required: true
         type: string
-        default: "3.11"
+      codeartifact-repo:
+        description: "CodeArtifact repository name"
+        required: true
+        type: string
+      codeartifact-owner:
+        description: "AWS account ID (CodeArtifact domain owner)"
+        required: true
+        type: string
+      # --- Agent settings ---
       run-tests:
-        description: "Whether to run uv tests before Docker build"
+        description: "Whether to run tests before Docker build"
         required: false
         type: boolean
         default: true
@@ -49,7 +67,7 @@ on:
         default: true
     secrets:
       AWS_ROLE_ARN:
-        description: "IAM role ARN with ECR permissions"
+        description: "IAM role ARN with ECR + CodeArtifact permissions"
         required: true
       ANTHROPIC_API_KEY:
         description: "Optional: Claude API key for AI-powered analysis"
@@ -59,6 +77,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     if: inputs.run-tests
+
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -78,7 +100,33 @@ jobs:
       - name: Install CI Agent
         run: pip install .ci-templates/agent
 
-      - name: Install dependencies
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      # Configure uv/pip to pull framework libs from CodeArtifact
+      - name: Configure CodeArtifact as package source
+        run: |
+          CODEARTIFACT_URL=$(aws codeartifact get-repository-endpoint \
+            --domain ${{ inputs.codeartifact-domain }} \
+            --domain-owner ${{ inputs.codeartifact-owner }} \
+            --repository ${{ inputs.codeartifact-repo }} \
+            --format pypi \
+            --query repositoryEndpoint \
+            --output text)
+          CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain ${{ inputs.codeartifact-domain }} \
+            --domain-owner ${{ inputs.codeartifact-owner }} \
+            --query authorizationToken \
+            --output text)
+          echo "UV_EXTRA_INDEX_URL=https://aws:${CODEARTIFACT_TOKEN}@${CODEARTIFACT_URL#https://}simple/" >> $GITHUB_ENV
+          echo "PIP_EXTRA_INDEX_URL=https://aws:${CODEARTIFACT_TOKEN}@${CODEARTIFACT_URL#https://}simple/" >> $GITHUB_ENV
+          echo "CODEARTIFACT_URL=$CODEARTIFACT_URL" >> $GITHUB_ENV
+          echo "CODEARTIFACT_TOKEN=$CODEARTIFACT_TOKEN" >> $GITHUB_ENV
+
+      - name: Install dependencies (including framework libs from CodeArtifact)
         run: uv sync --all-extras
 
       # ---- Primary test run ----
@@ -88,7 +136,7 @@ jobs:
         run: |
           uv run pytest 2>&1 | tee /tmp/build.log
 
-      # ---- Self-healing for tests ----
+      # ---- Self-healing ----
       - name: Diagnose test failure
         id: heal
         if: inputs.enable-healing && steps.test.outcome == 'failure'
@@ -117,9 +165,9 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.test.outcome }}" = "success" ] || [ "${{ steps.retry.outcome }}" = "success" ]; then
-            echo "Tests passed"
+            echo "Agent tests passed"
           else
-            echo "::error::Tests failed after healing attempts"
+            echo "::error::Agent tests failed after healing attempts"
             exit 1
           fi
 
@@ -159,6 +207,25 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ inputs.aws-region }}
 
+      # Generate CodeArtifact pip index URL for Docker build
+      - name: Get CodeArtifact credentials for Docker build
+        id: codeartifact
+        run: |
+          CODEARTIFACT_URL=$(aws codeartifact get-repository-endpoint \
+            --domain ${{ inputs.codeartifact-domain }} \
+            --domain-owner ${{ inputs.codeartifact-owner }} \
+            --repository ${{ inputs.codeartifact-repo }} \
+            --format pypi \
+            --query repositoryEndpoint \
+            --output text)
+          CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain ${{ inputs.codeartifact-domain }} \
+            --domain-owner ${{ inputs.codeartifact-owner }} \
+            --query authorizationToken \
+            --output text)
+          PIP_INDEX="https://aws:${CODEARTIFACT_TOKEN}@${CODEARTIFACT_URL#https://}simple/"
+          echo "pip-index-url=$PIP_INDEX" >> "$GITHUB_OUTPUT"
+
       - name: Login to Amazon ECR
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
@@ -188,8 +255,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ---- Primary Docker build ----
-      - name: Build and push Docker image
+      # ---- Docker build — pass CodeArtifact index so Dockerfile can pip install framework libs ----
+      - name: Build and push agent image
         id: docker-build
         continue-on-error: true
         uses: docker/build-push-action@v6
@@ -200,6 +267,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            PIP_EXTRA_INDEX_URL=${{ steps.codeartifact.outputs.pip-index-url }}
 
       # ---- Self-healing for Docker build ----
       - name: Diagnose Docker failure
@@ -221,6 +290,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           no-cache: true
+          build-args: |
+            PIP_EXTRA_INDEX_URL=${{ steps.codeartifact.outputs.pip-index-url }}
 
       # ---- Record and report ----
       - name: Determine status
@@ -239,7 +310,7 @@ jobs:
         if: always() && inputs.enable-analysis
         run: |
           ci-agent record \
-            --build-type docker \
+            --build-type agent \
             --status "${{ steps.status.outputs.status }}" \
             --failure-class "${{ steps.heal-docker.outputs.failure-class || '' }}" \
             --healing-strategy "${{ steps.heal-docker.outputs.strategy || '' }}"
@@ -255,7 +326,7 @@ jobs:
         if: always()
         run: |
           STATUS="${{ steps.status.outputs.status }}"
-          echo "### Docker Build — ${STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo "### Agent Image — ${STATUS}" >> $GITHUB_STEP_SUMMARY
           if [ "$STATUS" != "failure" ]; then
             echo "- **Image:** ${{ steps.meta.outputs.primary-image }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY

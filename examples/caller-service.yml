@@ -1,4 +1,5 @@
-# Example: .github/workflows/ci.yml for a Dockerized service repo (has Dockerfile)
+# Example: .github/workflows/ci.yml for an AGENT repo (service → ECR)
+# e.g., scp-agent-test-runner
 # Copy this file to your repo's .github/workflows/ci.yml and update the values.
 
 name: CI
@@ -13,10 +14,11 @@ jobs:
   build:
     uses: Aptos-Unified-Commerce/scp-ci-templates/.github/workflows/ci-detect-and-build.yml@main
     with:
-      package-name: my_service                 # ← your package name
-      ecr-repository: my-service               # ← your ECR repository name
-      codeartifact-domain: your-domain         # ← your CodeArtifact domain (still needed for detect workflow)
+      package-name: scp_agent_test_runner      # ← your package name
+      ecr-repository: scp-agent-test-runner    # ← your ECR repository name
+      codeartifact-domain: your-domain         # ← needed to pull framework libs during docker build
       codeartifact-repo: your-repo             # ← your CodeArtifact repository
       codeartifact-owner: "123456789012"       # ← your AWS account ID
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # Optional

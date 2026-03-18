@@ -1,46 +1,24 @@
-"""Detect deployment target from project structure."""
+"""Detect repo role (framework vs agent) and deployment target."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 
-def detect_deploy_target(repo_path: Path, project_type: str, has_dockerfile: bool) -> str:
-    """Infer the deployment target.
+def detect_repo_role(repo_path: Path, has_dockerfile: bool) -> tuple[str, str]:
+    """Determine if this repo is a 'framework' (library) or 'agent' (service).
 
-    Priority:
-    1. Dockerfile → ecr
-    2. SAM/serverless → lambda
-    3. CDK → cdk
-    4. Python library → codeartifact
-    5. Node library → npm (or codeartifact)
+    Returns (repo_role, deploy_target):
+        - framework → codeartifact  (library published as a Python package)
+        - agent     → ecr           (service built as a Docker image)
+
+    Heuristics:
+        1. Dockerfile present → agent (service that ships as a container)
+        2. No Dockerfile      → framework (library published to CodeArtifact)
+        3. .ci-agent.yml can override this
     """
-    # Docker always means ECR
     if has_dockerfile:
-        return "ecr"
+        return "agent", "ecr"
 
-    # SAM template
-    if (repo_path / "template.yaml").exists() or (repo_path / "template.yml").exists():
-        return "lambda"
-
-    # Serverless framework
-    if (repo_path / "serverless.yml").exists() or (repo_path / "serverless.yaml").exists():
-        return "lambda"
-
-    # AWS CDK
-    if (repo_path / "cdk.json").exists():
-        return "cdk"
-
-    # Terraform
-    for tf in repo_path.glob("*.tf"):
-        return "terraform"
-
-    # Library — publish to artifact repo
-    if project_type == "python":
-        return "codeartifact"
-    if project_type == "node":
-        return "npm"
-    if project_type == "go":
-        return "go-module"
-
-    return "codeartifact"
+    # No Dockerfile — it's a framework/library
+    return "framework", "codeartifact"

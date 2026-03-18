@@ -39,6 +39,7 @@ def cmd_detect(args: argparse.Namespace) -> None:
     print(plan.to_json())
 
     _write_github_output("build-plan", plan.to_json())
+    _write_github_output("repo-role", plan.repo_role)
     _write_github_output("project-type", plan.project_type)
     _write_github_output("deploy-target", plan.deploy_target)
     _write_github_output("has-dockerfile", str(plan.has_dockerfile).lower())
@@ -47,6 +48,7 @@ def cmd_detect(args: argparse.Namespace) -> None:
 
     if plan.security_warnings:
         summary = "### CI Agent Detection\n\n"
+        summary += f"**Role:** {plan.repo_role} | "
         summary += f"**Project type:** {plan.project_type} | "
         summary += f"**Deploy target:** {plan.deploy_target} | "
         summary += f"**Confidence:** {plan.confidence:.0%}\n\n"

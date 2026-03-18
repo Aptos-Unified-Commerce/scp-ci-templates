@@ -11,16 +11,17 @@ from datetime import datetime, timezone
 class BuildPlan:
     """Output of the detection phase — describes what and how to build."""
 
-    project_type: str  # python, node, go, rust, java, docker-only, unknown
+    repo_role: str = "framework"  # framework (library → CodeArtifact) or agent (service → ECR)
+    project_type: str = "python"  # python, node, go, rust, java, unknown
     frameworks: list[str] = field(default_factory=list)
     test_tool: str | None = None
-    deploy_target: str = "codeartifact"  # ecr, codeartifact, lambda, s3
+    deploy_target: str = "codeartifact"  # codeartifact (frameworks) or ecr (agents)
     has_dockerfile: bool = False
     python_version: str | None = None
     node_version: str | None = None
     go_version: str | None = None
     security_warnings: list[str] = field(default_factory=list)
-    suggested_workflow: str = "ci-python"
+    suggested_workflow: str = "ci-framework"  # ci-framework or ci-agent-service
     confidence: float = 1.0
 
     def to_json(self) -> str:
@@ -28,7 +29,7 @@ class BuildPlan:
 
     @classmethod
     def from_json(cls, data: str) -> BuildPlan:
-        return cls(**json.loads(data))
+        return cls(**{k: v for k, v in json.loads(data).items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -56,7 +57,7 @@ class BuildRecord:
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     branch: str = ""
     commit_sha: str = ""
-    build_type: str = ""
+    build_type: str = ""  # framework or agent
     duration_seconds: float = 0.0
     status: str = "unknown"  # success, failure, healed
     failure_class: str | None = None

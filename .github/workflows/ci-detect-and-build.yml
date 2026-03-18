@@ -1,5 +1,9 @@
 name: Detect & Build (Autonomous)
 
+# Autonomous router that detects the repo role and routes to the right pipeline:
+#   - Framework (library) → ci-framework.yml → test + uv build → CodeArtifact
+#   - Agent (service)     → ci-agent-service.yml → test + docker build → ECR
+
 on:
   workflow_call:
     inputs:
@@ -13,9 +17,8 @@ on:
         required: false
         type: string
         default: "us-east-1"
-      # --- CodeArtifact inputs (used when no Dockerfile) ---
       package-name:
-        description: "Python package name for artifact upload"
+        description: "Package name (for framework artifact upload)"
         required: true
         type: string
       codeartifact-domain:
@@ -30,9 +33,8 @@ on:
         description: "AWS account ID (CodeArtifact domain owner)"
         required: true
         type: string
-      # --- ECR inputs (used when Dockerfile exists) ---
       ecr-repository:
-        description: "ECR repository name (required if repo has a Dockerfile)"
+        description: "ECR repository name (required for agent repos)"
         required: false
         type: string
         default: ""
@@ -46,7 +48,6 @@ on:
         required: false
         type: string
         default: "."
-      # --- Agent settings ---
       enable-healing:
         description: "Enable self-healing on build failures"
         required: false
@@ -70,12 +71,12 @@ jobs:
   detect:
     runs-on: ubuntu-latest
     outputs:
+      repo-role: ${{ steps.detect.outputs.repo-role }}
       project-type: ${{ steps.detect.outputs.project-type }}
       deploy-target: ${{ steps.detect.outputs.deploy-target }}
       has-dockerfile: ${{ steps.detect.outputs.has-dockerfile }}
       suggested-workflow: ${{ steps.detect.outputs.suggested-workflow }}
       confidence: ${{ steps.detect.outputs.confidence }}
-      build-plan: ${{ steps.detect.outputs.build-plan }}
 
     steps:
       - name: Checkout caller repo
@@ -105,17 +106,18 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Repo Role** | \`${{ steps.detect.outputs.repo-role }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Project Type | \`${{ steps.detect.outputs.project-type }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Deploy Target | \`${{ steps.detect.outputs.deploy-target }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Has Dockerfile | ${{ steps.detect.outputs.has-dockerfile }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Suggested Workflow | \`${{ steps.detect.outputs.suggested-workflow }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Workflow | \`${{ steps.detect.outputs.suggested-workflow }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Confidence | ${{ steps.detect.outputs.confidence }} |" >> $GITHUB_STEP_SUMMARY
 
-  # ---- Phase 2a: Python library path ----
-  python-build:
+  # ---- Framework path: library → test + uv build → CodeArtifact ----
+  framework-build:
     needs: detect
-    if: needs.detect.outputs.has-dockerfile == 'false' && needs.detect.outputs.project-type == 'python'
-    uses: ./.github/workflows/ci-python.yml
+    if: needs.detect.outputs.repo-role == 'framework'
+    uses: ./.github/workflows/ci-framework.yml
     with:
       python-version: ${{ inputs.python-version }}
       package-name: ${{ inputs.package-name }}
@@ -130,17 +132,20 @@ jobs:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-  # ---- Phase 2b: Docker service path ----
-  docker-build:
+  # ---- Agent path: service → test + docker build → ECR ----
+  agent-build:
     needs: detect
-    if: needs.detect.outputs.has-dockerfile == 'true'
-    uses: ./.github/workflows/ci-docker.yml
+    if: needs.detect.outputs.repo-role == 'agent'
+    uses: ./.github/workflows/ci-agent-service.yml
     with:
       python-version: ${{ inputs.python-version }}
       aws-region: ${{ inputs.aws-region }}
       ecr-repository: ${{ inputs.ecr-repository }}
       dockerfile-path: ${{ inputs.dockerfile-path }}
       docker-context: ${{ inputs.docker-context }}
+      codeartifact-domain: ${{ inputs.codeartifact-domain }}
+      codeartifact-repo: ${{ inputs.codeartifact-repo }}
+      codeartifact-owner: ${{ inputs.codeartifact-owner }}
       run-tests: true
       enable-healing: ${{ inputs.enable-healing }}
       enable-analysis: ${{ inputs.enable-analysis }}

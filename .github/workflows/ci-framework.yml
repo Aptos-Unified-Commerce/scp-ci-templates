@@ -1,4 +1,7 @@
-name: Python Build & Publish (with Self-Healing)
+name: "Framework: Build Library & Publish to CodeArtifact"
+
+# Frameworks are shared Python libraries (e.g., scp-ai-platform) that other
+# agent services depend on. They are built with uv and published to CodeArtifact.
 
 on:
   workflow_call:
@@ -100,7 +103,7 @@ jobs:
           uv run pytest 2>&1 | tee /tmp/build.log
           echo "duration=$(($(date +%s) - START_TIME))" >> "$GITHUB_OUTPUT"
 
-      - name: Build package
+      - name: Build library package
         id: build
         if: steps.test.outcome == 'success'
         continue-on-error: true
@@ -159,7 +162,6 @@ jobs:
         id: heal2-apply
         if: steps.heal2.outcome == 'success' && steps.heal2.outputs.should-retry == 'true'
         run: |
-          echo "Applying healing strategy (attempt 2): ${{ steps.heal2.outputs.strategy }}"
           COMMANDS='${{ steps.heal2.outputs.retry-commands }}'
           if [ -n "$COMMANDS" ]; then
             echo "$COMMANDS" | while IFS= read -r cmd; do
@@ -200,7 +202,7 @@ jobs:
         if: always() && inputs.enable-analysis
         run: |
           ci-agent record \
-            --build-type python \
+            --build-type framework \
             --status "${{ steps.status.outputs.status }}" \
             --duration "${{ steps.test.outputs.duration || 0 }}" \
             --failure-class "${{ steps.heal.outputs.failure-class || '' }}" \
@@ -220,16 +222,15 @@ jobs:
           name: ${{ inputs.package-name }}
           path: dist/
 
-      # ---- Fail the job if not healed ----
       - name: Check final result
         if: always()
         run: |
           STATUS="${{ steps.status.outputs.status }}"
           if [ "$STATUS" = "failure" ]; then
-            echo "::error::Build failed after all healing attempts"
+            echo "::error::Framework build failed after all healing attempts"
             exit 1
           fi
-          echo "Build completed with status: $STATUS"
+          echo "Framework build completed with status: $STATUS"
 
   publish:
     needs: build-and-test
@@ -286,7 +287,7 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### Published to CodeArtifact" >> $GITHUB_STEP_SUMMARY
+          echo "### Framework Published to CodeArtifact" >> $GITHUB_STEP_SUMMARY
           echo "- **Package:** ${{ inputs.package-name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Version:** ${{ needs.build-and-test.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Repository:** ${{ inputs.codeartifact-domain }}/${{ inputs.codeartifact-repo }}" >> $GITHUB_STEP_SUMMARY

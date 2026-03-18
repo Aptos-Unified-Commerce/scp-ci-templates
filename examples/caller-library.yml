@@ -1,4 +1,5 @@
-# Example: .github/workflows/ci.yml for a Python library repo (no Dockerfile)
+# Example: .github/workflows/ci.yml for a FRAMEWORK repo (library → CodeArtifact)
+# e.g., scp-ai-platform
 # Copy this file to your repo's .github/workflows/ci.yml and update the values.
 
 name: CI
@@ -19,3 +20,4 @@ jobs:
       codeartifact-owner: "123456789012"       # ← your AWS account ID
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # Optional
