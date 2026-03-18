@@ -179,6 +179,48 @@ jobs:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
+  # ---- Phase 3c: Auto-create issues for recurring failures ----
+  check-recurring-failures:
+    needs: [detect, framework-build, agent-build]
+    if: |
+      always() &&
+      inputs.enable-analysis &&
+      (needs.framework-build.result == 'success' || needs.framework-build.result == 'failure' ||
+       needs.agent-build.result == 'success' || needs.agent-build.result == 'failure')
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Checkout CI templates
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+          path: .ci-templates
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CI Agent
+        run: pip install .ci-templates/agent
+
+      - name: Restore build history
+        uses: actions/cache@v4
+        with:
+          path: build_history.json
+          key: build-history-${{ github.repository }}-${{ github.ref_name }}
+          restore-keys: |
+            build-history-${{ github.repository }}-
+
+      - name: Check for recurring failures and create issues
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ci-agent auto-issue --history-file build_history.json --min-occurrences 3
+
   # ---- Phase 4: Update version file + tag (only on main, after successful build) ----
   version-and-tag:
     needs: [detect, framework-build, agent-build, security]

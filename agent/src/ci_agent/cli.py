@@ -59,9 +59,16 @@ def cmd_detect(args: argparse.Namespace) -> None:
 
 
 def cmd_heal(args: argparse.Namespace) -> None:
+    from ci_agent.analyze.history import BuildHistory
     from ci_agent.heal.healer import Healer
 
-    healer = Healer()
+    # Load build history for smart strategy ranking (closed-loop healing)
+    records = None
+    if args.history_file and os.path.exists(args.history_file):
+        history = BuildHistory(history_file=args.history_file)
+        records = history.records
+
+    healer = Healer(records=records)
 
     log_content = ""
     if args.log_file and os.path.exists(args.log_file):
@@ -155,6 +162,81 @@ def cmd_security(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_auto_issue(args: argparse.Namespace) -> None:
+    """Check build history for recurring failures and create GitHub issues."""
+    from ci_agent.analyze.history import BuildHistory
+    from ci_agent.heal.issue_creator import create_recurring_failure_issue, should_create_issue
+    from ci_agent.heal.scorer import StrategyScorer
+
+    history = BuildHistory(history_file=args.history_file)
+    scorer = StrategyScorer(history.records)
+    recurring = scorer.get_recurring_failures(min_occurrences=args.min_occurrences)
+
+    issues_created = []
+    issues_skipped = []
+
+    for failure in recurring:
+        if not should_create_issue(
+            failure["failure_class"],
+            failure["total_attempts"],
+            failure["success_rate"],
+            min_attempts=args.min_occurrences,
+        ):
+            issues_skipped.append(failure["failure_class"])
+            continue
+
+        # Get recent branches affected
+        recent_branches = list(set(
+            r.branch for r in history.records
+            if r.failure_class == failure["failure_class"] and r.branch
+        ))[:5]
+
+        url = create_recurring_failure_issue(
+            failure_class=failure["failure_class"],
+            total_attempts=failure["total_attempts"],
+            success_rate=failure["success_rate"],
+            strategies_tried=failure["strategies_tried"],
+            recent_branches=recent_branches,
+        )
+
+        if url:
+            issues_created.append({"failure_class": failure["failure_class"], "url": url})
+        else:
+            issues_skipped.append(failure["failure_class"])
+
+    result = {
+        "recurring_failures": recurring,
+        "issues_created": issues_created,
+        "issues_skipped": issues_skipped,
+    }
+
+    print(json.dumps(result, indent=2))
+
+    _write_github_output("issues-created", str(len(issues_created)))
+    _write_github_output("recurring-failures", str(len(recurring)))
+
+    if issues_created or recurring:
+        summary = "### CI Agent — Recurring Failure Check\n\n"
+        summary += f"**Recurring failures detected:** {len(recurring)}\n"
+        summary += f"**Issues created:** {len(issues_created)}\n\n"
+
+        if issues_created:
+            summary += "#### New Issues\n"
+            for issue in issues_created:
+                summary += f"- `{issue['failure_class']}` → [{issue['url']}]({issue['url']})\n"
+            summary += "\n"
+
+        if recurring:
+            summary += "#### Recurring Failures\n"
+            summary += "| Failure Class | Attempts | Success Rate | Needs Fix |\n"
+            summary += "|--------------|----------|-------------|----------|\n"
+            for f in recurring:
+                needs_fix = "Yes" if f["needs_permanent_fix"] else "No"
+                summary += f"| `{f['failure_class']}` | {f['total_attempts']} | {f['success_rate']:.0%} | {needs_fix} |\n"
+
+        _write_step_summary(summary)
+
+
 def cmd_docker_gen(args: argparse.Namespace) -> None:
     """Generate Dockerfile from golden template + repo config."""
     from ci_agent.docker.generator import generate_dockerfile
@@ -217,6 +299,7 @@ def main() -> None:
     p_heal = subparsers.add_parser("heal", help="Analyze failure and suggest healing strategy")
     p_heal.add_argument("--log-file", required=True, help="Path to the build log file")
     p_heal.add_argument("--attempt", type=int, default=1, help="Current retry attempt number")
+    p_heal.add_argument("--history-file", default="build_history.json", help="Build history for smart strategy ranking")
     p_heal.set_defaults(func=cmd_heal)
 
     # analyze
@@ -236,6 +319,12 @@ def main() -> None:
     p_security.add_argument("--image", default=None, help="Docker image to scan (for agent repos)")
     p_security.add_argument("--fail-on-high", action="store_true", help="Exit non-zero on critical/high findings")
     p_security.set_defaults(func=cmd_security)
+
+    # auto-issue
+    p_issue = subparsers.add_parser("auto-issue", help="Create GitHub issues for recurring failures")
+    p_issue.add_argument("--history-file", default="build_history.json", help="Build history file")
+    p_issue.add_argument("--min-occurrences", type=int, default=3, help="Min healing attempts to trigger issue")
+    p_issue.set_defaults(func=cmd_auto_issue)
 
     # docker-gen
     p_docker = subparsers.add_parser("docker-gen", help="Generate Dockerfile from golden template")
