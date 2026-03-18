@@ -1,9 +1,93 @@
 # SCP CI Templates
 
-Reusable GitHub Actions workflows for SCP services. Provides a single entry point that auto-detects the build type:
+Autonomous CI/CD platform for SCP services with smart detection, self-healing, and build analytics.
 
-- **No Dockerfile** → Python library build with uv → publish to **AWS CodeArtifact**
-- **Dockerfile found** → Docker image build → push to **AWS ECR**
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Caller Repo CI                       │
+│              (minimal .github/workflows/ci.yml)         │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────┐
+│              ci-detect-and-build.yml                     │
+│                                                         │
+│  ┌──────────────┐   ┌──────────────┐   ┌────────────┐  │
+│  │   Detection   │──▶│   Routing    │──▶│   Build    │  │
+│  │    Agent      │   │  (auto)      │   │  Pipeline  │  │
+│  └──────────────┘   └──────────────┘   └─────┬──────┘  │
+│                                               │         │
+│                          ┌────────────────────┤         │
+│                          ▼                    ▼         │
+│                   ┌────────────┐      ┌────────────┐   │
+│                   │  Healing   │      │  Analytics  │   │
+│                   │   Agent    │      │    Agent    │   │
+│                   └────────────┘      └────────────┘   │
+│                                               │         │
+│                          ┌────────────────────┤         │
+│                          ▼                    ▼         │
+│                   ┌────────────┐      ┌────────────┐   │
+│                   │ CodeArtifact│     │    ECR      │   │
+│                   └────────────┘      └────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Autonomous Capabilities
+
+### 1. Smart Detection
+
+The agent scans the caller repo and auto-detects:
+
+| What | How |
+|------|-----|
+| **Project type** | Marker files: `pyproject.toml` (Python), `package.json` (Node), `go.mod` (Go), `Cargo.toml` (Rust), `pom.xml` (Java) |
+| **Frameworks** | Dependency scanning: FastAPI, Flask, Django, Express, Next.js, Gin, LangChain, etc. |
+| **Test tools** | Config detection: pytest, jest, vitest, go test, maven-surefire |
+| **Deploy target** | Structure inference: Dockerfile → ECR, SAM/serverless → Lambda, library → CodeArtifact |
+| **Security issues** | Committed `.env` files, hardcoded credentials, unpinned deps, Dockerfile anti-patterns |
+
+Detection outputs a `BuildPlan` with a **confidence score** (0.0–1.0).
+
+### 2. Self-Healing
+
+When a build fails, the agent classifies the failure and applies a healing strategy:
+
+| Failure Class | Pattern | Strategy |
+|--------------|---------|----------|
+| `dependency-conflict` | `ResolutionImpossible`, version conflicts | Clear lockfile, retry with relaxed resolution |
+| `test-flaky` | Timeout in tests, intermittent failures | Retry failed tests only with `--lf` |
+| `test-failure` | `FAILED tests/`, `AssertionError` | Retry test suite (max 1 retry) |
+| `network-timeout` | `ETIMEDOUT`, `ConnectionResetError` | Retry with extended timeouts |
+| `rate-limit` | HTTP 429, `Too Many Requests` | Backoff 30s and retry |
+| `disk-space` | `ENOSPC`, `No space left` | Prune Docker/pip caches, retry |
+| `auth-failure` | 401/403, `ExpiredToken` | Refresh credentials, retry |
+| `oom` | `MemoryError`, `heap out of memory` | Reduce parallelism, retry |
+| `docker-build-failure` | `executor failed running` | Retry without Docker cache |
+| `import-error` | `ModuleNotFoundError` | Reinstall dependencies from scratch |
+
+Each build gets up to **2 healing attempts**. If a failure is healed 3+ times across builds, the analyzer flags it for a permanent fix.
+
+### 3. Build Analytics & Learning
+
+The agent tracks build history (last 200 runs per branch) and produces:
+
+- **Average build time** and trend (improving/stable/degrading)
+- **Failure rate** and top failure classes
+- **Flaky test detection** (branches that alternate success/failure)
+- **Healing effectiveness** (success rate per strategy)
+- **Optimization recommendations** (caching, parallelization, splitting jobs)
+
+### 4. AI-Powered Analysis (Optional)
+
+When `ANTHROPIC_API_KEY` is provided, the agent sends failure logs to Claude for:
+
+- **Root cause analysis** of complex failures
+- **Specific fix suggestions** with exact commands/code changes
+- **Pipeline optimization recommendations** based on build history
+
+Falls back to heuristic analysis when no API key is set.
 
 ---
 
@@ -12,89 +96,43 @@ Reusable GitHub Actions workflows for SCP services. Provides a single entry poin
 ```
 scp-ci-templates/
 ├── .github/workflows/
-│   ├── ci-detect-and-build.yml   # Smart router: detects Dockerfile, picks the right path
-│   ├── ci-python.yml             # Reusable: uv build + test + publish to CodeArtifact
-│   └── ci-docker.yml             # Reusable: Docker build + push to ECR
+│   ├── ci-detect-and-build.yml      # Smart router with agent-based detection
+│   ├── ci-python.yml                # Python: uv build + test + self-healing + CodeArtifact
+│   ├── ci-docker.yml                # Docker: build + self-healing + ECR push
+│   └── ci-agent-analyze.yml         # Scheduled build analytics workflow
+├── agent/                           # Python CI Agent package
+│   ├── pyproject.toml
+│   ├── src/ci_agent/
+│   │   ├── cli.py                   # CLI: ci-agent detect|heal|analyze|record
+│   │   ├── models.py                # BuildPlan, HealingAction, BuildRecord, AnalysisReport
+│   │   ├── detect/                  # Detection modules
+│   │   │   ├── detector.py          # Orchestrator
+│   │   │   ├── project_type.py      # Language detection
+│   │   │   ├── framework.py         # Framework detection
+│   │   │   ├── test_tools.py        # Test tool detection
+│   │   │   ├── deploy_target.py     # Deployment target inference
+│   │   │   └── security.py          # Security scanning
+│   │   ├── heal/                    # Self-healing modules
+│   │   │   ├── healer.py            # Failure diagnosis
+│   │   │   ├── strategies.py        # Pattern catalog (10+ failure types)
+│   │   │   └── pr_creator.py        # Auto-fix PR creation
+│   │   ├── analyze/                 # Analytics modules
+│   │   │   ├── analyzer.py          # Report generation
+│   │   │   ├── history.py           # Build history persistence
+│   │   │   ├── insights.py          # Trend analysis, flaky test detection
+│   │   │   └── optimizer.py         # Optimization recommendations
+│   │   └── llm/
+│   │       └── advisor.py           # Optional Claude-powered analysis
+│   └── tests/                       # 23 unit tests
 ├── examples/
-│   ├── caller-library.yml        # Example: how a Python library repo calls the template
-│   └── caller-service.yml        # Example: how a Dockerized service repo calls the template
+│   ├── caller-library.yml
+│   └── caller-service.yml
 └── README.md
 ```
 
 ---
 
-## How It Works
-
-```
-Caller repo CI
-      │
-      ▼
-ci-detect-and-build.yml
-      │
-      ├── Dockerfile found?
-      │       │
-      │       YES → ci-docker.yml → Build image → Push to ECR
-      │       │
-      │       NO  → ci-python.yml → uv build + test → Publish to CodeArtifact
-      │
-      ▼
-   Done
-```
-
----
-
-## Available Workflows
-
-### 1. `ci-detect-and-build.yml` — Smart Router (Recommended)
-
-Auto-detects whether the repo has a Dockerfile and routes to the appropriate build workflow. **Use this as your single entry point.**
-
-#### Inputs
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `python-version` | No | `3.11` | Python version |
-| `aws-region` | No | `us-east-1` | AWS region |
-| `package-name` | Yes | — | Python package name (for artifact upload) |
-| `codeartifact-domain` | Yes | — | CodeArtifact domain |
-| `codeartifact-repo` | Yes | — | CodeArtifact repository |
-| `codeartifact-owner` | Yes | — | AWS account ID |
-| `ecr-repository` | No | `""` | ECR repo name (required if repo has Dockerfile) |
-| `dockerfile-path` | No | `Dockerfile` | Path to Dockerfile |
-| `docker-context` | No | `.` | Docker build context |
-
-#### Secrets
-
-| Secret | Description |
-|--------|-------------|
-| `AWS_ROLE_ARN` | IAM role ARN with CodeArtifact and/or ECR permissions |
-
----
-
-### 2. `ci-python.yml` — Python Library Build
-
-Use directly if you know the repo is always a Python library.
-
-- Installs dependencies with `uv sync --all-extras`
-- Runs `uv run pytest`
-- Builds with `uv build`
-- Publishes to CodeArtifact when `publish: true`
-
----
-
-### 3. `ci-docker.yml` — Docker Build & Push
-
-Use directly if you know the repo always has a Dockerfile.
-
-- Optionally runs `uv run pytest` before Docker build
-- Builds Docker image with Buildx (layer caching enabled)
-- Pushes to ECR with tags: `<sha>`, `<branch>`, `latest` (on main)
-
----
-
-## Usage — Calling from Your Repo
-
-### Option A: Smart detection (recommended)
+## Quick Start — Calling from Your Repo
 
 Create `.github/workflows/ci.yml` in your repo:
 
@@ -118,90 +156,93 @@ jobs:
       ecr-repository: my-service          # Only needed if repo has a Dockerfile
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # Optional: enables AI analysis
 ```
 
-That's it. The template handles everything:
-- If your repo has a `Dockerfile` → builds and pushes to ECR
-- If not → builds Python package and publishes to CodeArtifact
+The agent handles everything autonomously:
+- Detects your project type, frameworks, and deploy target
+- Runs tests and builds
+- Self-heals on failure (up to 2 retries with different strategies)
+- Tracks build history for analytics
+- Publishes to CodeArtifact or ECR based on detection
 
-### Option B: Python library only
+---
 
-```yaml
-name: CI
+## Override Detection with `.ci-agent.yml`
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-jobs:
-  build:
-    uses: Aptos-Unified-Commerce/scp-ci-templates/.github/workflows/ci-python.yml@main
-    with:
-      package-name: scp_ai_platform
-      codeartifact-domain: my-domain
-      codeartifact-repo: my-repo
-      codeartifact-owner: "123456789012"
-      publish: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-```
-
-### Option C: Docker service only
+Place this in your repo root to override auto-detection:
 
 ```yaml
-name: CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-jobs:
-  build:
-    uses: Aptos-Unified-Commerce/scp-ci-templates/.github/workflows/ci-docker.yml@main
-    with:
-      ecr-repository: my-service
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+project_type: python
+frameworks:
+  - fastapi
+deploy_target: ecr
+suggested_workflow: ci-docker
+test_tool: pytest
+python_version: ">=3.11"
 ```
 
 ---
 
-## Updating scp-ai-platform to Use Templates
+## CLI Reference
 
-Replace the existing `.github/workflows/ci.yml` in `scp-ai-platform` with:
+The agent is also usable as a standalone CLI:
 
-```yaml
-name: CI
+```bash
+# Install
+pip install ./agent
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+# Detect project type and generate build plan
+ci-agent detect --repo-path /path/to/repo
 
-jobs:
-  build:
-    uses: Aptos-Unified-Commerce/scp-ci-templates/.github/workflows/ci-detect-and-build.yml@main
-    with:
-      package-name: scp_ai_platform
-      codeartifact-domain: your-domain         # ← change
-      codeartifact-repo: your-repo             # ← change
-      codeartifact-owner: "123456789012"       # ← change
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+# Diagnose a build failure
+ci-agent heal --log-file /tmp/build.log --attempt 1
+
+# Analyze build history
+ci-agent analyze --history-file build_history.json
+
+# Record a build result
+ci-agent record --build-type python --status success --duration 45.2
 ```
+
+---
+
+## Workflow Reference
+
+### `ci-detect-and-build.yml` — Smart Router (Primary Entry Point)
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `package-name` | Yes | — | Python package name |
+| `codeartifact-domain` | Yes | — | CodeArtifact domain |
+| `codeartifact-repo` | Yes | — | CodeArtifact repository |
+| `codeartifact-owner` | Yes | — | AWS account ID |
+| `ecr-repository` | No | `""` | ECR repo (needed if Dockerfile exists) |
+| `enable-healing` | No | `true` | Enable self-healing |
+| `enable-analysis` | No | `true` | Enable build analytics |
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `AWS_ROLE_ARN` | Yes | IAM role for CodeArtifact/ECR |
+| `ANTHROPIC_API_KEY` | No | Enables AI-powered failure analysis |
+
+### `ci-python.yml` — Python Build with Self-Healing
+
+Direct use for Python-only repos. Includes full healing loop (2 attempts), build history tracking, and CodeArtifact publishing.
+
+### `ci-docker.yml` — Docker Build with Self-Healing
+
+Direct use for Docker repos. Heals Docker build failures (cache invalidation, no-cache retry). Pushes to ECR with tags: `<sha>`, `<branch>`, `latest`.
+
+### `ci-agent-analyze.yml` — Build Analytics
+
+Run on schedule or on-demand to analyze build history and generate optimization reports.
 
 ---
 
 ## AWS Prerequisites
 
 ### IAM Role Permissions
-
-The IAM role needs permissions for both CodeArtifact and ECR:
 
 ```json
 {
@@ -240,8 +281,6 @@ The IAM role needs permissions for both CodeArtifact and ECR:
 
 ### GitHub OIDC Trust Policy
 
-The IAM role must trust GitHub Actions:
-
 ```json
 {
   "Version": "2012-10-17",
@@ -262,14 +301,9 @@ The IAM role must trust GitHub Actions:
 }
 ```
 
----
+### Secrets (set at org level)
 
-## GitHub Secret
-
-Each caller repo needs one secret:
-
-| Secret | Value |
-|--------|-------|
-| `AWS_ROLE_ARN` | `arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>` |
-
-This can be set at the **organization level** so all repos inherit it automatically.
+| Secret | Description |
+|--------|-------------|
+| `AWS_ROLE_ARN` | IAM role ARN |
+| `ANTHROPIC_API_KEY` | Optional — enables AI analysis |

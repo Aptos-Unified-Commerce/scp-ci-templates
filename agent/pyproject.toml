@@ -1,0 +1,28 @@
+[project]
+name = "ci-agent"
+version = "0.1.0"
+description = "Autonomous CI/CD agent with smart detection, self-healing, and build analytics."
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+llm = [
+    "anthropic>=0.40.0",
+]
+test = [
+    "pytest",
+    "pytest-mock",
+]
+
+[project.scripts]
+ci-agent = "ci_agent.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

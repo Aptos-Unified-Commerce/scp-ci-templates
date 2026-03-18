@@ -1,4 +1,4 @@
-name: Python Build & Publish
+name: Python Build & Publish (with Self-Healing)
 
 on:
   workflow_call:
@@ -34,19 +34,40 @@ on:
         required: false
         type: boolean
         default: false
+      enable-healing:
+        description: "Enable self-healing on failures"
+        required: false
+        type: boolean
+        default: true
+      enable-analysis:
+        description: "Enable build history tracking"
+        required: false
+        type: boolean
+        default: true
     secrets:
       AWS_ROLE_ARN:
         description: "IAM role ARN with CodeArtifact permissions"
         required: true
+      ANTHROPIC_API_KEY:
+        description: "Optional: Claude API key for AI-powered analysis"
+        required: false
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      status: ${{ steps.status.outputs.status }}
+      failure-class: ${{ steps.heal.outputs.failure-class }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout CI templates
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+          path: .ci-templates
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -54,26 +75,161 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ inputs.python-version }}
 
+      - name: Install CI Agent
+        run: pip install .ci-templates/agent
+
+      - name: Restore build history
+        if: inputs.enable-analysis
+        uses: actions/cache@v4
+        with:
+          path: build_history.json
+          key: build-history-${{ github.repository }}-${{ github.ref_name }}
+          restore-keys: |
+            build-history-${{ github.repository }}-
+
+      # ---- Primary Build ----
       - name: Install dependencies
         run: uv sync --all-extras
 
       - name: Run tests
-        run: uv run pytest
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          START_TIME=$(date +%s)
+          uv run pytest 2>&1 | tee /tmp/build.log
+          echo "duration=$(($(date +%s) - START_TIME))" >> "$GITHUB_OUTPUT"
 
       - name: Build package
-        run: uv build
+        id: build
+        if: steps.test.outcome == 'success'
+        continue-on-error: true
+        run: |
+          uv build 2>&1 | tee -a /tmp/build.log
 
       - name: Extract version
         id: version
+        if: steps.build.outcome == 'success'
         run: |
           VERSION=$(grep -m1 'version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # ---- Self-Healing (Attempt 1) ----
+      - name: Diagnose failure
+        id: heal
+        if: inputs.enable-healing && (steps.test.outcome == 'failure' || steps.build.outcome == 'failure')
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: ci-agent heal --log-file /tmp/build.log --attempt 1
+
+      - name: Apply healing strategy
+        id: heal-apply
+        if: steps.heal.outcome == 'success' && steps.heal.outputs.should-retry == 'true'
+        run: |
+          echo "Applying healing strategy: ${{ steps.heal.outputs.strategy }}"
+          COMMANDS='${{ steps.heal.outputs.retry-commands }}'
+          if [ -n "$COMMANDS" ]; then
+            echo "$COMMANDS" | while IFS= read -r cmd; do
+              [ -n "$cmd" ] && eval "$cmd"
+            done
+          fi
+
+      - name: Retry tests (healed)
+        id: retry-test
+        if: steps.heal-apply.outcome == 'success'
+        continue-on-error: true
+        run: |
+          uv sync --all-extras
+          uv run pytest 2>&1 | tee /tmp/build-retry.log
+
+      - name: Retry build (healed)
+        id: retry-build
+        if: steps.retry-test.outcome == 'success'
+        run: uv build
+
+      # ---- Self-Healing (Attempt 2) ----
+      - name: Diagnose failure (attempt 2)
+        id: heal2
+        if: inputs.enable-healing && steps.retry-test.outcome == 'failure'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: ci-agent heal --log-file /tmp/build-retry.log --attempt 2
+
+      - name: Apply healing strategy (attempt 2)
+        id: heal2-apply
+        if: steps.heal2.outcome == 'success' && steps.heal2.outputs.should-retry == 'true'
+        run: |
+          echo "Applying healing strategy (attempt 2): ${{ steps.heal2.outputs.strategy }}"
+          COMMANDS='${{ steps.heal2.outputs.retry-commands }}'
+          if [ -n "$COMMANDS" ]; then
+            echo "$COMMANDS" | while IFS= read -r cmd; do
+              [ -n "$cmd" ] && eval "$cmd"
+            done
+          fi
+
+      - name: Retry tests (attempt 2)
+        id: retry2-test
+        if: steps.heal2-apply.outcome == 'success'
+        continue-on-error: true
+        run: |
+          uv sync --all-extras
+          uv run pytest 2>&1 | tee /tmp/build-retry2.log
+
+      - name: Retry build (attempt 2)
+        id: retry2-build
+        if: steps.retry2-test.outcome == 'success'
+        run: uv build
+
+      # ---- Determine final status ----
+      - name: Set final status
+        id: status
+        if: always()
+        run: |
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.retry-build.outcome }}" = "success" ]; then
+            echo "status=healed" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.retry2-build.outcome }}" = "success" ]; then
+            echo "status=healed" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---- Record build history ----
+      - name: Record build result
+        if: always() && inputs.enable-analysis
+        run: |
+          ci-agent record \
+            --build-type python \
+            --status "${{ steps.status.outputs.status }}" \
+            --duration "${{ steps.test.outputs.duration || 0 }}" \
+            --failure-class "${{ steps.heal.outputs.failure-class || '' }}" \
+            --healing-strategy "${{ steps.heal.outputs.strategy || '' }}"
+
+      - name: Save build history
+        if: always() && inputs.enable-analysis
+        uses: actions/cache/save@v4
+        with:
+          path: build_history.json
+          key: build-history-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+
       - name: Upload build artifacts
+        if: steps.status.outputs.status != 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.package-name }}
           path: dist/
+
+      # ---- Fail the job if not healed ----
+      - name: Check final result
+        if: always()
+        run: |
+          STATUS="${{ steps.status.outputs.status }}"
+          if [ "$STATUS" = "failure" ]; then
+            echo "::error::Build failed after all healing attempts"
+            exit 1
+          fi
+          echo "Build completed with status: $STATUS"
 
   publish:
     needs: build-and-test

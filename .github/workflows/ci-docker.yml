@@ -1,4 +1,4 @@
-name: Docker Build & Push to ECR
+name: Docker Build & Push to ECR (with Self-Healing)
 
 on:
   workflow_call:
@@ -37,10 +37,23 @@ on:
         required: false
         type: boolean
         default: true
+      enable-healing:
+        description: "Enable self-healing on failures"
+        required: false
+        type: boolean
+        default: true
+      enable-analysis:
+        description: "Enable build history tracking"
+        required: false
+        type: boolean
+        default: true
     secrets:
       AWS_ROLE_ARN:
         description: "IAM role ARN with ECR permissions"
         required: true
+      ANTHROPIC_API_KEY:
+        description: "Optional: Claude API key for AI-powered analysis"
+        required: false
 
 jobs:
   test:
@@ -50,17 +63,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout CI templates
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+          path: .ci-templates
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
       - name: Set up Python
         run: uv python install ${{ inputs.python-version }}
 
+      - name: Install CI Agent
+        run: pip install .ci-templates/agent
+
       - name: Install dependencies
         run: uv sync --all-extras
 
+      # ---- Primary test run ----
       - name: Run tests
-        run: uv run pytest
+        id: test
+        continue-on-error: true
+        run: |
+          uv run pytest 2>&1 | tee /tmp/build.log
+
+      # ---- Self-healing for tests ----
+      - name: Diagnose test failure
+        id: heal
+        if: inputs.enable-healing && steps.test.outcome == 'failure'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: ci-agent heal --log-file /tmp/build.log --attempt 1
+
+      - name: Apply healing
+        if: steps.heal.outcome == 'success' && steps.heal.outputs.should-retry == 'true'
+        run: |
+          COMMANDS='${{ steps.heal.outputs.retry-commands }}'
+          if [ -n "$COMMANDS" ]; then
+            echo "$COMMANDS" | while IFS= read -r cmd; do
+              [ -n "$cmd" ] && eval "$cmd"
+            done
+          fi
+
+      - name: Retry tests
+        id: retry
+        if: steps.heal.outcome == 'success' && steps.heal.outputs.should-retry == 'true'
+        run: |
+          uv sync --all-extras
+          uv run pytest
+
+      - name: Fail if tests failed
+        if: always()
+        run: |
+          if [ "${{ steps.test.outcome }}" = "success" ] || [ "${{ steps.retry.outcome }}" = "success" ]; then
+            echo "Tests passed"
+          else
+            echo "::error::Tests failed after healing attempts"
+            exit 1
+          fi
 
   docker-build-push:
     needs: test
@@ -71,11 +132,26 @@ jobs:
       id-token: write
       contents: read
 
-    outputs:
-      image-uri: ${{ steps.build-push.outputs.image-uri }}
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout CI templates
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+          path: .ci-templates
+
+      - name: Install CI Agent
+        run: pip install .ci-templates/agent
+
+      - name: Restore build history
+        if: inputs.enable-analysis
+        uses: actions/cache@v4
+        with:
+          path: build_history.json
+          key: build-history-${{ github.repository }}-${{ github.ref_name }}
+          restore-keys: |
+            build-history-${{ github.repository }}-
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -95,7 +171,6 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           BRANCH=$(echo "${GITHUB_REF_NAME}" | sed 's/[^a-zA-Z0-9._-]/-/g')
 
-          # Build tag list
           TAGS="${REGISTRY}/${REPO}:${SHA_SHORT}"
           TAGS="${TAGS},${REGISTRY}/${REPO}:${BRANCH}"
 
@@ -113,8 +188,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ---- Primary Docker build ----
       - name: Build and push Docker image
-        id: build-push
+        id: docker-build
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.docker-context }}
@@ -124,9 +201,69 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Summary
+      # ---- Self-healing for Docker build ----
+      - name: Diagnose Docker failure
+        id: heal-docker
+        if: inputs.enable-healing && steps.docker-build.outcome == 'failure'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          echo "### Docker Image Pushed to ECR" >> $GITHUB_STEP_SUMMARY
-          echo "- **Repository:** ${{ inputs.ecr-repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image:** ${{ steps.meta.outputs.primary-image }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "Docker build failed" > /tmp/docker-build.log
+          ci-agent heal --log-file /tmp/docker-build.log --attempt 1
+
+      - name: Retry Docker build (no cache)
+        id: retry-docker
+        if: steps.heal-docker.outcome == 'success' && steps.heal-docker.outputs.should-retry == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.docker-context }}
+          file: ${{ inputs.dockerfile-path }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          no-cache: true
+
+      # ---- Record and report ----
+      - name: Determine status
+        id: status
+        if: always()
+        run: |
+          if [ "${{ steps.docker-build.outcome }}" = "success" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.retry-docker.outcome }}" = "success" ]; then
+            echo "status=healed" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record build result
+        if: always() && inputs.enable-analysis
+        run: |
+          ci-agent record \
+            --build-type docker \
+            --status "${{ steps.status.outputs.status }}" \
+            --failure-class "${{ steps.heal-docker.outputs.failure-class || '' }}" \
+            --healing-strategy "${{ steps.heal-docker.outputs.strategy || '' }}"
+
+      - name: Save build history
+        if: always() && inputs.enable-analysis
+        uses: actions/cache/save@v4
+        with:
+          path: build_history.json
+          key: build-history-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Summary
+        if: always()
+        run: |
+          STATUS="${{ steps.status.outputs.status }}"
+          echo "### Docker Build — ${STATUS}" >> $GITHUB_STEP_SUMMARY
+          if [ "$STATUS" != "failure" ]; then
+            echo "- **Image:** ${{ steps.meta.outputs.primary-image }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail if not healed
+        if: always()
+        run: |
+          if [ "${{ steps.status.outputs.status }}" = "failure" ]; then
+            exit 1
+          fi

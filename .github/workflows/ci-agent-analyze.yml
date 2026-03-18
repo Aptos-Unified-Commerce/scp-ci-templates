@@ -1,0 +1,57 @@
+name: CI Agent — Build Analytics
+
+on:
+  workflow_call:
+    inputs:
+      history-key-prefix:
+        description: "Cache key prefix for build history"
+        required: false
+        type: string
+        default: "build-history"
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: "Optional: Claude API key for AI-powered optimization suggestions"
+        required: false
+
+  # Can also be triggered on schedule from caller repos
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout CI templates
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CI Agent
+        run: pip install ./agent
+
+      - name: Restore build history
+        uses: actions/cache@v4
+        with:
+          path: build_history.json
+          key: ${{ inputs.history-key-prefix }}-${{ github.repository }}-${{ github.ref_name }}
+          restore-keys: |
+            ${{ inputs.history-key-prefix }}-${{ github.repository }}-
+
+      - name: Run analysis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: ci-agent analyze --history-file build_history.json
+
+      - name: LLM-powered suggestions
+        if: env.ANTHROPIC_API_KEY != ''
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "### AI-Powered Optimization Suggestions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Powered by Claude_" >> $GITHUB_STEP_SUMMARY

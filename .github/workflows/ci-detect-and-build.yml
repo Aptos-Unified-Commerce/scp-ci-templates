@@ -1,4 +1,4 @@
-name: Detect & Build
+name: Detect & Build (Autonomous)
 
 on:
   workflow_call:
@@ -46,40 +46,75 @@ on:
         required: false
         type: string
         default: "."
+      # --- Agent settings ---
+      enable-healing:
+        description: "Enable self-healing on build failures"
+        required: false
+        type: boolean
+        default: true
+      enable-analysis:
+        description: "Enable build analytics and history tracking"
+        required: false
+        type: boolean
+        default: true
     secrets:
       AWS_ROLE_ARN:
         description: "IAM role ARN with CodeArtifact and/or ECR permissions"
         required: true
+      ANTHROPIC_API_KEY:
+        description: "Optional: Claude API key for AI-powered failure analysis"
+        required: false
 
 jobs:
+  # ---- Phase 1: Autonomous Detection ----
   detect:
     runs-on: ubuntu-latest
     outputs:
-      has-dockerfile: ${{ steps.check.outputs.has-dockerfile }}
-      build-type: ${{ steps.check.outputs.build-type }}
+      project-type: ${{ steps.detect.outputs.project-type }}
+      deploy-target: ${{ steps.detect.outputs.deploy-target }}
+      has-dockerfile: ${{ steps.detect.outputs.has-dockerfile }}
+      suggested-workflow: ${{ steps.detect.outputs.suggested-workflow }}
+      confidence: ${{ steps.detect.outputs.confidence }}
+      build-plan: ${{ steps.detect.outputs.build-plan }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
 
-      - name: Detect build type
-        id: check
+      - name: Checkout CI templates (for agent)
+        uses: actions/checkout@v4
+        with:
+          repository: Aptos-Unified-Commerce/scp-ci-templates
+          path: .ci-templates
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CI Agent
+        run: pip install .ci-templates/agent
+
+      - name: Run detection
+        id: detect
+        run: ci-agent detect --repo-path .
+
+      - name: Detection summary
         run: |
-          if [ -f "${{ inputs.dockerfile-path }}" ]; then
-            echo "has-dockerfile=true" >> "$GITHUB_OUTPUT"
-            echo "build-type=docker" >> "$GITHUB_OUTPUT"
-            echo "### Build Type: Docker (ECR)" >> $GITHUB_STEP_SUMMARY
-            echo "Detected \`${{ inputs.dockerfile-path }}\` — will build Docker image and push to ECR." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "has-dockerfile=false" >> "$GITHUB_OUTPUT"
-            echo "build-type=python" >> "$GITHUB_OUTPUT"
-            echo "### Build Type: Python Library (CodeArtifact)" >> $GITHUB_STEP_SUMMARY
-            echo "No Dockerfile found — will build Python package and publish to CodeArtifact." >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "### CI Agent Detection Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Project Type | \`${{ steps.detect.outputs.project-type }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy Target | \`${{ steps.detect.outputs.deploy-target }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Has Dockerfile | ${{ steps.detect.outputs.has-dockerfile }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Suggested Workflow | \`${{ steps.detect.outputs.suggested-workflow }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Confidence | ${{ steps.detect.outputs.confidence }} |" >> $GITHUB_STEP_SUMMARY
 
-  # ---- Python library path: build, test, publish to CodeArtifact ----
+  # ---- Phase 2a: Python library path ----
   python-build:
     needs: detect
-    if: needs.detect.outputs.has-dockerfile == 'false'
+    if: needs.detect.outputs.has-dockerfile == 'false' && needs.detect.outputs.project-type == 'python'
     uses: ./.github/workflows/ci-python.yml
     with:
       python-version: ${{ inputs.python-version }}
@@ -89,10 +124,13 @@ jobs:
       codeartifact-repo: ${{ inputs.codeartifact-repo }}
       codeartifact-owner: ${{ inputs.codeartifact-owner }}
       publish: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+      enable-healing: ${{ inputs.enable-healing }}
+      enable-analysis: ${{ inputs.enable-analysis }}
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-  # ---- Docker path: build, test, push to ECR ----
+  # ---- Phase 2b: Docker service path ----
   docker-build:
     needs: detect
     if: needs.detect.outputs.has-dockerfile == 'true'
@@ -104,5 +142,8 @@ jobs:
       dockerfile-path: ${{ inputs.dockerfile-path }}
       docker-context: ${{ inputs.docker-context }}
       run-tests: true
+      enable-healing: ${{ inputs.enable-healing }}
+      enable-analysis: ${{ inputs.enable-analysis }}
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
