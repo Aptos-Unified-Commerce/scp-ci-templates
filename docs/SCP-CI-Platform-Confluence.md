@@ -41,8 +41,8 @@ Python microservices that run as containers and use framework libraries.
 
 | Signal | Classification |
 |--------|---------------|
-| Repo has `pyproject.toml` but no `Dockerfile` | Framework |
-| Repo has `pyproject.toml` and a `Dockerfile` marker (via `.ci-agent.yml`) | Agent |
+| Repo has `pyproject.toml` but no `Dockerfile` or service indicators | Framework |
+| Repo has `Dockerfile`, `docker-compose.yml`, `Procfile`, `k8s/` dir, or service-like dependencies (FastAPI, Flask, gunicorn) | Agent |
 | Override via `.ci-agent.yml` with `repo_role: agent` or `repo_role: framework` | Manual override |
 
 ---
@@ -99,12 +99,12 @@ When the pipeline starts, the CI Agent runs `ci-agent detect` which scans the re
 
 | Category | What it looks for | How |
 |----------|------------------|-----|
-| **Repo role** | Framework or Agent | Presence of Dockerfile or `.ci-agent.yml` override |
+| **Repo role** | Framework or Agent | Dockerfile, docker-compose, Procfile, k8s dirs, service deps, or `.ci-agent.yml` override |
 | **Language** | Python, Node.js, Go, Rust, Java | Marker files: `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `pom.xml` |
 | **Frameworks** | FastAPI, Flask, Django, LangChain, Express, etc. | Scans dependency lists in `pyproject.toml`, `package.json`, `go.mod` |
 | **Test tool** | pytest, jest, go test, etc. | Looks for `[tool.pytest]` in pyproject.toml, `jest.config.*`, `_test.go` files |
 | **Python version** | `>=3.11` etc. | Reads `requires-python` from `pyproject.toml` |
-| **Security issues** | Leaked secrets, sensitive files, unpinned deps | Regex scanning of source files, checks for `.env`, `*.pem`, `*.key` |
+| **Security issues** | Leaked secrets, sensitive files, unpinned deps, workflow vulnerabilities | Regex scanning of source files, checks for `.env`, `*.pem`, `*.key`, GitHub Actions injection checks |
 | **Confidence** | 0.0 to 1.0 | Based on how many signals were found |
 
 ### Example detection output
@@ -124,7 +124,7 @@ Warning:    Hardcoded credential in tests/unit/test_agent_invoker_tool.py
 
 ### Override detection
 
-Place `.ci-agent.yml` in the repo root:
+Place `.ci-agent.yml` in the repo root. The CI agent validates config values and logs warnings for invalid fields (e.g., unknown `repo_role`, `project_type`, or unrecognized keys), falling back to auto-detection rather than silently ignoring errors.
 
 ```yaml
 repo_role: agent          # force agent even without Dockerfile
@@ -171,7 +171,7 @@ When a build step fails, the CI Agent reads the build log, classifies the failur
 
 ```
 Step fails → ci-agent heal reads the log
-           → Matches against 10+ known failure patterns
+           → Matches against 15+ known failure patterns
            → Returns: what failed, what to do, retry commands
            → Pipeline applies the fix and retries
            → Up to 2 retry attempts per build
@@ -191,6 +191,10 @@ Step fails → ci-agent heal reads the log
 | **Auth failure** | `401 Unauthorized`, `403 Forbidden`, `ExpiredToken` | Flags for credential refresh, retries |
 | **Docker build failure** | `executor failed running`, layer errors | Retries Docker build without cache |
 | **Import error** | `ModuleNotFoundError`, `ImportError` | Deletes `.venv`, reinstalls all dependencies |
+| **ECR rate limit** | `toomanyrequests`, pull rate limit | Backoff 60 seconds, retry |
+| **CodeArtifact unavailable** | `ServiceException`, token failures | Refresh credentials, retry |
+| **Git conflict** | `CONFLICT (content)`, merge errors | Reset to clean state, retry |
+| **NPM install failure** | `npm ERR!`, `ERESOLVE`, socket timeout | Clear node_modules and cache, retry |
 | **Unknown** | No pattern matches | Does not retry — reports failure immediately |
 
 ### What gets tracked
@@ -285,6 +289,8 @@ scp-ci-templates repo                     Agent repo (e.g., scp-agent-orders)
 
 - **Multi-stage build** — builder stage for compiling, slim runtime stage
 - **Non-root user** — `appuser` with UID 1001 for security
+- **Setuid/setgid stripping** — removes privilege escalation binaries from the image
+- **Security labels** — orchestrator hints (`read-only-root`, `no-new-privileges`, `drop-capabilities`)
 - **Health check** — built-in `HEALTHCHECK` hitting `/health` every 30s
 - **CodeArtifact support** — `PIP_EXTRA_INDEX_URL` build arg for framework dependencies
 - **Optimized layers** — dependencies installed before source code for better caching
@@ -426,7 +432,7 @@ The analyzer produces actionable suggestions:
 
 ### Storage
 
-Build history is stored as a JSON file (last 200 records per branch) in the CI cache. No database or external service required.
+Build history is stored as a JSON file (last 200 records per repo, partitioned by `GITHUB_REPOSITORY`) in the CI cache. No database or external service required. The storage format is backward-compatible with the older flat-list format.
 
 ---
 
@@ -589,7 +595,7 @@ scp-ci-templates/
 │   │   ├── cli.py                   7 CLI commands
 │   │   ├── models.py               Data models (BuildPlan, HealingAction, etc.)
 │   │   ├── detect/                  Repo detection (6 modules)
-│   │   ├── heal/                    Self-healing (3 modules, 10+ patterns)
+│   │   ├── heal/                    Self-healing (3 modules, 15+ patterns)
 │   │   ├── analyze/                 Build analytics (4 modules)
 │   │   ├── version/                 Semantic versioning
 │   │   ├── security/                Security scan orchestrator
@@ -767,7 +773,7 @@ Typical build: ~3–5 min. At 20 pushes/day across 10 repos → ~1,000–1,500 m
 | **Framework build** | `uv sync` → `pytest` → `uv build` → publish to CodeArtifact |
 | **Agent build** | `uv sync` → `pytest` → generate Dockerfile from golden template → `docker build` → push to ECR |
 | **Centralized Dockerfile** | Golden template in scp-ci-templates → generated at runtime → never in agent repos |
-| **Self-healing** | 10+ failure patterns detected from logs → targeted fix applied → retry (up to 2x) |
+| **Self-healing** | 15+ failure patterns detected from logs → targeted fix applied → retry (up to 2x) |
 | **Versioning** | Conventional commits → auto-bump pyproject.toml → git tag → always in sync |
 | **Security** | 5 tools (pip-audit, bandit, trivy, hadolint, gitleaks) → unified report → optional deployment gate |
 | **Analytics** | Build history tracked → failure trends, flaky tests, optimization suggestions |

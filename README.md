@@ -31,8 +31,8 @@ Autonomous CI/CD platform for SCP services with smart detection, self-healing, a
 | **Agent** | Python service with Dockerfile (e.g., `scp-agent-test-runner`) | `uv test` → `docker build` | **ECR** | `ci-agent-service.yml` |
 
 The CI agent **auto-detects** which type your repo is:
-- **No Dockerfile** → Framework → CodeArtifact
-- **Has Dockerfile** → Agent → ECR (pulls framework libs from CodeArtifact during build)
+- **No Dockerfile, no service indicators** → Framework → CodeArtifact
+- **Has Dockerfile, docker-compose, Procfile, k8s dir, or service-like dependencies (FastAPI, Flask, gunicorn, etc.)** → Agent → ECR (pulls framework libs from CodeArtifact during build)
 
 ---
 
@@ -148,6 +148,7 @@ scp-ci-templates/dockerfiles/agent.Dockerfile  →  generated at CI runtime  →
 - Update Python version, security hardening, or base image once → all agents get it
 - Agent teams focus on application code, not Docker configuration
 - Consistent image structure across all services
+- Built-in security: non-root user, setuid/setgid binary stripping, security labels for orchestrators
 
 **Per-repo customization** via `.ci-agent.yml` (no Dockerfile editing needed):
 
@@ -173,13 +174,13 @@ If no `.ci-agent.yml` exists, the agent auto-detects the entrypoint from `pyproj
 
 | What | How |
 |------|-----|
-| **Repo role** | Dockerfile present → agent; absent → framework |
+| **Repo role** | Dockerfile, docker-compose, Procfile, k8s dirs, or service deps (FastAPI, Flask, gunicorn) → agent; otherwise → framework |
 | **Project type** | Marker files: `pyproject.toml`, `package.json`, `go.mod`, etc. |
 | **Frameworks** | Dependency scanning: FastAPI, Flask, LangChain, Express, etc. |
 | **Test tools** | Config detection: pytest, jest, go test, etc. |
-| **Security** | Committed `.env`, hardcoded credentials, unpinned deps |
+| **Security** | Committed `.env`, hardcoded credentials, unpinned deps, GitHub Actions workflow injection checks |
 
-### 2. Self-Healing (10+ failure patterns)
+### 2. Self-Healing (15+ failure patterns)
 
 | Failure | Strategy |
 |---------|----------|
@@ -191,6 +192,11 @@ If no `.ci-agent.yml` exists, the agent auto-detects the entrypoint from `pyproj
 | Docker build failure | Retry without cache |
 | Import error | Reinstall deps |
 | Auth failure | Refresh credentials |
+| Disk space exhausted | Prune Docker/pip caches |
+| ECR rate limit / throttle | Backoff 60s, retry |
+| CodeArtifact unavailable | Refresh token, retry |
+| Git conflict | Reset to clean state |
+| NPM install failure | Clear cache, reinstall |
 
 Up to **2 healing attempts** per build.
 
@@ -224,10 +230,17 @@ Integrated security scans run **in parallel** with builds on every CI run:
 | **hadolint** | Dockerfile best practices | Dockerfile linting |
 | **gitleaks** | Code + git history for leaked secrets | Secret detection |
 
+Additionally, the detection phase scans **GitHub Actions workflows** for:
+- Unpinned third-party actions (missing SHA/tag)
+- Script injection via untrusted inputs (`github.event.issue.title`, etc.)
+- Missing `permissions:` blocks (defaults to broad read/write)
+
 Results are:
 - Aggregated into a unified report in GitHub Step Summary
 - Uploaded as SARIF to GitHub Security tab
 - Saved as a build artifact
+
+All security tools are **version-pinned** in CI (pip-audit, bandit, trivy, gitleaks, hadolint) to prevent unexpected breakage from upstream releases.
 
 Set `fail-on-high-severity: true` to block builds with critical/high findings.
 
@@ -235,10 +248,11 @@ Set `fail-on-high-severity: true` to block builds with critical/high findings.
 
 ### 5. Build Analytics
 
-- Tracks last 200 builds per branch
+- Tracks last 200 builds per repo (partitioned by `GITHUB_REPOSITORY`)
 - Failure rate, build time trends, flaky test detection
 - Healing effectiveness tracking
 - Optimization recommendations
+- Version rollback support if publish fails after version bump
 
 ### 6. AI Analysis (Optional)
 
@@ -310,6 +324,8 @@ frameworks:
 repo_role: framework
 project_type: python
 ```
+
+The CI agent **validates** `.ci-agent.yml` fields and logs warnings for invalid values (e.g., unknown `repo_role` or `project_type`), falling back to auto-detection rather than silently ignoring errors.
 
 ---
 

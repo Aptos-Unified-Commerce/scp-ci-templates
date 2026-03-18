@@ -106,7 +106,7 @@ The CI Agent scans the repo and outputs a **Build Plan**:
 
 | What it detects | How |
 |----------------|-----|
-| **Repo role** | Dockerfile present → Agent; absent → Framework |
+| **Repo role** | Dockerfile, docker-compose, Procfile, k8s dirs, or service deps (FastAPI, gunicorn) → Agent; absent → Framework |
 | **Language** | Marker files: `pyproject.toml` (Python), `package.json` (Node), `go.mod` (Go) |
 | **Frameworks in use** | Dependency scanning: FastAPI, Flask, LangChain, Express, etc. |
 | **Test tool** | Config detection: pytest, jest, go test |
@@ -148,7 +148,7 @@ Test → [FAIL] → Diagnose → Apply healing strategy → Retry
                                                             [FAIL] → Report failure
 ```
 
-**10+ failure patterns are automatically detected and healed:**
+**15+ failure patterns are automatically detected and healed:**
 
 | Failure Pattern | What triggers it | Healing strategy |
 |----------------|-----------------|------------------|
@@ -162,6 +162,10 @@ Test → [FAIL] → Diagnose → Apply healing strategy → Retry
 | Auth failure | 401/403, expired token | Refresh AWS credentials |
 | Disk space | `ENOSPC` | Prune Docker/pip caches, retry |
 | Test failure | `AssertionError` | Retry full test suite (max 1 retry) |
+| ECR rate limit | `toomanyrequests`, pull rate limit | Backoff 60 seconds, retry |
+| CodeArtifact unavailable | `ServiceException`, token failures | Refresh credentials, retry |
+| Git conflict | `CONFLICT (content)`, merge errors | Reset to clean state, retry |
+| NPM install failure | `npm ERR!`, `ERESOLVE` | Clear cache, reinstall |
 
 Each build gets **up to 2 healing attempts** before failing. Healed builds are tracked separately for analytics.
 
@@ -185,6 +189,8 @@ scp-ci-templates/dockerfiles/agent.Dockerfile    (golden template, centrally man
 **What the golden template provides (all agents get this automatically):**
 - Multi-stage build (builder + runtime) for smaller images
 - Non-root user (`appuser`) for security
+- Setuid/setgid binary stripping to reduce attack surface
+- Security labels for orchestrators (`read-only-root`, `no-new-privileges`, `drop-capabilities`)
 - Built-in `HEALTHCHECK` on `/health`
 - `PIP_EXTRA_INDEX_URL` build arg for CodeArtifact framework dependencies
 - Optimized layer ordering (deps before source for better caching)
@@ -284,8 +290,8 @@ scp-ci-templates/
 │   ├── src/ci_agent/
 │   │   ├── cli.py                    # CLI: 7 commands (detect, version, security, docker-gen, heal, analyze, record)
 │   │   ├── models.py                 # Data models (BuildPlan, HealingAction, etc.)
-│   │   ├── detect/                   # Auto-detection (5 modules)
-│   │   ├── heal/                     # Self-healing (3 modules, 10+ patterns)
+│   │   ├── detect/                   # Auto-detection (6 modules)
+│   │   ├── heal/                     # Self-healing (3 modules, 15+ patterns)
 │   │   ├── analyze/                  # Build analytics (4 modules)
 │   │   ├── version/                  # Semantic versioning
 │   │   ├── security/                 # Security scan orchestrator (5 tools)
@@ -523,8 +529,8 @@ Then run `ci-agent docker-gen` — it picks up your config automatically.
 The SCP CI Templates platform transforms CI/CD from a per-repo configuration burden into a centralized, intelligent, self-healing system. Every repo in the organization gets:
 
 - **Autonomous detection** — no manual pipeline configuration
-- **Self-healing builds** — 10+ failure patterns auto-resolved
-- **Security by default** — 5 tools on every build
+- **Self-healing builds** — 15+ failure patterns auto-resolved (including ECR/CodeArtifact transient failures)
+- **Security by default** — 5 tools on every build + GitHub Actions workflow security checks
 - **Automatic versioning** — conventional commits drive releases
 - **Build intelligence** — analytics, trends, optimization recommendations
 - **Optional AI insights** — Claude-powered failure analysis
