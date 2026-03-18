@@ -665,7 +665,101 @@ No Dockerfile. No `.dockerignore`. No `requirements.txt`. No security tool confi
 
 ---
 
-## 18. Summary
+## 18. Licensing, Subscriptions & Credentials
+
+### Software Licensing
+
+Every tool used by this platform is free and open-source. No paid software licenses are required.
+
+| Component | License | Cost |
+|-----------|---------|------|
+| Python | PSF (open source) | Free |
+| uv | MIT / Apache 2.0 | Free |
+| pytest | MIT | Free |
+| pip-audit | Apache 2.0 | Free |
+| bandit | Apache 2.0 | Free |
+| trivy | Apache 2.0 | Free |
+| hadolint | GPL-3.0 (standalone CLI usage — no linking concern) | Free |
+| gitleaks | MIT | Free |
+| Docker / Buildx | Apache 2.0 | Free |
+| gh CLI | MIT | Free |
+
+### Subscriptions Required
+
+| Service | Type | What you need | Estimated cost |
+|---------|------|--------------|----------------|
+| **GitHub** | Org account (Free, Team, or Enterprise) | You already have `Aptos-Unified-Commerce` | Included in current plan |
+| **AWS** | Pay-as-you-go account | Active account with billing enabled | See below |
+
+**GitHub Actions minutes:**
+
+| Plan | Included minutes/month | Overage |
+|------|----------------------|---------|
+| Free | 2,000 min | $0.008/min |
+| Team | 3,000 min | $0.008/min |
+| Enterprise | 50,000 min | $0.008/min |
+
+Typical build: ~3–5 min. At 20 pushes/day across 10 repos → ~1,000–1,500 min/month (within free tier).
+
+**AWS costs (usage-based, no license):**
+
+| Service | Pricing | Typical cost |
+|---------|---------|-------------|
+| CodeArtifact | $0.05/GB stored + $0.09/GB transferred | < $5/month |
+| ECR | $0.10/GB stored + data transfer | < $10/month |
+| IAM / OIDC | Free | Free |
+
+### Optional Subscription
+
+| Service | Cost | Required? | What breaks without it |
+|---------|------|-----------|----------------------|
+| **Anthropic API** (Claude) | ~$0.01–0.03 per failure analysis | No | AI failure analysis disabled — everything else works |
+| **Snyk** (future, not yet implemented) | Free tier: 200 tests/month; Paid: ~$25/dev/month | No | pip-audit + trivy continue to work as replacements |
+| **Docker Hub** | Free: 100 pulls/6hrs per IP | No (rarely hits limit) | Mirror `python:3.11-slim` to ECR if rate-limited |
+
+### Credentials to Configure
+
+**One-time setup — GitHub org secrets** (`Settings → Secrets and variables → Actions`):
+
+| Secret | Value | Required |
+|--------|-------|----------|
+| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/github-ci-role` | Yes |
+| `ANTHROPIC_API_KEY` | `sk-ant-...` | No |
+
+**Per-repo values** (set in each repo's `ci.yml` or auto-filled by `create-repo.sh`):
+
+| Input | Example | Required |
+|-------|---------|----------|
+| `codeartifact-domain` | `my-org` | Yes |
+| `codeartifact-repo` | `python-packages` | Yes |
+| `codeartifact-owner` | `123456789012` | Yes |
+| `ecr-repository` | `scp-agent-orders` | Only for agents |
+| `package-name` | `scp_ai_platform` | Yes |
+
+### AWS Resources to Create (one-time setup)
+
+| Resource | How to create | Notes |
+|----------|-------------|-------|
+| IAM OIDC Identity Provider | IAM Console → Identity Providers → Add `token.actions.githubusercontent.com` | Enables GitHub Actions to assume AWS roles without long-lived keys |
+| IAM Role | IAM Console → Create role → Web identity → Trust GitHub OIDC | Attach CodeArtifact + ECR permissions (see Section 17) |
+| CodeArtifact Domain | CodeArtifact Console → Create domain | One per org |
+| CodeArtifact Repository | CodeArtifact Console → Create repository (under the domain) | One for all Python packages |
+| ECR Repository | ECR Console → Create repository | One per agent service |
+
+### What you do NOT need
+
+- No Docker Hub paid account
+- No PyPI account
+- No Snyk account (yet)
+- No SonarQube, Veracode, or any other paid SAST tool
+- No Artifactory/Nexus license
+- No Jenkins, CircleCI, or other CI platform subscription
+- No code signing certificates
+- No SSL certificates for CI
+
+---
+
+## 19. Summary
 
 | Capability | How it works |
 |-----------|-------------|
