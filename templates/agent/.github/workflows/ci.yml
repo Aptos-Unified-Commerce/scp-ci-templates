@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    uses: Aptos-Unified-Commerce/scp-ci-templates/.github/workflows/ci-detect-and-build.yml@main
+    with:
+      package-name: {{package_name}}
+      ecr-repository: {{ecr_repository}}
+      codeartifact-domain: {{codeartifact_domain}}
+      codeartifact-repo: {{codeartifact_repo}}
+      codeartifact-owner: "{{aws_account_id}}"
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
