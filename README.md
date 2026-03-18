@@ -141,7 +141,13 @@ Automatic version bumping based on [Conventional Commits](https://www.convention
 | `feat:` | **minor** | `feat: add auth module` |
 | `fix:` / `chore:` / `docs:` / anything else | **patch** | `fix: handle null response` |
 
-On push to `main`: version is computed → build runs → git tag `v{version}` is created automatically.
+On push to `main`:
+1. Version is computed from commits since last tag
+2. Build + tests + security scan run
+3. `pyproject.toml` is updated with the new version and committed back to `main`
+4. Git tag `v{version}` is created
+
+If `pyproject.toml` doesn't exist, it is **created automatically** starting at `0.0.1`. The tag and file version are always kept in sync.
 
 ### 4. Security Scanning
 
@@ -197,7 +203,7 @@ scp-ci-templates/
 │   │   ├── version/                 # Semantic versioning from conventional commits
 │   │   ├── security/                # Security scanning orchestrator (5 tools)
 │   │   └── llm/                     # Optional Claude-powered analysis
-│   └── tests/                       # 44 unit tests
+│   └── tests/                       # 46 unit tests
 ├── examples/
 │   ├── caller-library.yml           # Example for framework repos
 │   └── caller-service.yml           # Example for agent repos
