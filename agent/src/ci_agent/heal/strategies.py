@@ -161,6 +161,59 @@ FAILURE_PATTERNS: list[FailurePattern] = [
         retry_commands=["rm -rf .venv node_modules", "uv sync --all-extras 2>/dev/null || npm ci 2>/dev/null || true"],
         retry_env={},
     ),
+    FailurePattern(
+        name="ecr-throttle",
+        patterns=[
+            r"toomanyrequests",
+            r"You have reached your pull rate limit",
+            r"RepositoryNotFoundException",
+            r"ECR.*throttl",
+        ],
+        strategy="ecr-backoff-retry",
+        explanation="ECR rate limit or throttle. Waiting and retrying.",
+        retry_commands=["sleep 60"],
+        retry_env={},
+    ),
+    FailurePattern(
+        name="codeartifact-unavailable",
+        patterns=[
+            r"CodeArtifact.*ServiceException",
+            r"CodeArtifact.*Unavailable",
+            r"Could not connect to codeartifact",
+            r"GetAuthorizationToken.*failed",
+        ],
+        strategy="codeartifact-retry",
+        explanation="CodeArtifact temporarily unavailable. Refreshing token and retrying.",
+        retry_commands=[],
+        retry_env={"CI_AGENT_REFRESH_CREDS": "true"},
+    ),
+    FailurePattern(
+        name="git-conflict",
+        patterns=[
+            r"CONFLICT \(content\)",
+            r"Merge conflict",
+            r"Your local changes.*would be overwritten",
+            r"cannot lock ref",
+        ],
+        strategy="git-reset-retry",
+        explanation="Git conflict detected. Resetting and retrying from clean state.",
+        retry_commands=["git reset --hard HEAD", "git clean -fd"],
+        retry_env={},
+        max_retries=1,
+    ),
+    FailurePattern(
+        name="npm-install-failure",
+        patterns=[
+            r"npm ERR!",
+            r"ERR_SOCKET_TIMEOUT",
+            r"ERESOLVE unable to resolve dependency tree",
+            r"npm warn.*peer dep",
+        ],
+        strategy="npm-clean-retry",
+        explanation="NPM install failed. Clearing cache and retrying.",
+        retry_commands=["rm -rf node_modules package-lock.json", "npm cache clean --force"],
+        retry_env={},
+    ),
 ]
 
 

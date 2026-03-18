@@ -65,29 +65,38 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
+      # ---- Pinned tool versions (update these periodically) ----
+      # pip-audit: Python dep vulnerability scanner
+      # bandit: Python SAST
+      # trivy: Container + filesystem scanner
+      # gitleaks: Secret detection
+      # hadolint: Dockerfile linter
       - name: Install CI Agent and security tools
         run: |
           pip install .ci-templates/agent
-          pip install pip-audit bandit
+          pip install "pip-audit>=2.7.0,<3.0" "bandit>=1.7.8,<2.0"
 
       - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.58.0"
         run: |
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+          wget -q "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
+          sudo dpkg -i "trivy_${TRIVY_VERSION}_Linux-64bit.deb"
 
       - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.21.2"
         run: |
-          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep -o '"tag_name": "v[^"]*"' | head -1 | grep -o '[0-9.]*')
           wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_amd64.tar.gz"
           tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_amd64.tar.gz"
           sudo mv gitleaks /usr/local/bin/
 
       - name: Install hadolint
         if: hashFiles('Dockerfile') != ''
+        env:
+          HADOLINT_VERSION: "2.12.0"
         run: |
-          wget -q -O /usr/local/bin/hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          wget -q -O /usr/local/bin/hadolint "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
           chmod +x /usr/local/bin/hadolint
 
       # ---- Run all scans via CI Agent ----

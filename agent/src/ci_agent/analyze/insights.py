@@ -54,14 +54,13 @@ def detect_flaky_tests(records: list[BuildRecord]) -> list[str]:
     A test is considered flaky if it appears in failure_class == 'test-flaky'
     or if the same branch alternates between success and failure.
     """
-    flaky: set[str] = []
-
     # Check for branches that alternate between success and failure
     branch_results: dict[str, list[str]] = {}
     for r in records:
-        branch_results.setdefault(r.branch, []).append(r.status)
+        if r.branch:
+            branch_results.setdefault(r.branch, []).append(r.status)
 
-    flaky_branches = []
+    flaky_branches: list[str] = []
     for branch, statuses in branch_results.items():
         if len(statuses) >= 4:
             # Check for alternating pattern
@@ -70,6 +69,11 @@ def detect_flaky_tests(records: list[BuildRecord]) -> list[str]:
             )
             if alternations >= len(statuses) * 0.4:
                 flaky_branches.append(branch)
+
+    # Also flag branches with test-flaky failure class
+    for r in records:
+        if r.failure_class == "test-flaky" and r.branch and r.branch not in flaky_branches:
+            flaky_branches.append(r.branch)
 
     return flaky_branches
 

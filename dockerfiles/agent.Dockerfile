@@ -54,10 +54,22 @@ EXPOSE {{port}}
 # Security: run as non-root user
 RUN groupadd --gid 1001 appgroup && \
     useradd --uid 1001 --gid appgroup --create-home appuser
+
+# Security: remove setuid/setgid binaries to reduce attack surface
+RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
+
+# Security: make system dirs read-only where possible
+RUN chmod a-w /etc/passwd /etc/group 2>/dev/null || true
+
 USER appuser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:{{port}}/health')" || exit 1
+
+# Labels for runtime security policies (consumed by orchestrators)
+LABEL security.read-only-root="recommended"
+LABEL security.no-new-privileges="true"
+LABEL security.drop-capabilities="ALL"
 
 CMD {{entrypoint}}

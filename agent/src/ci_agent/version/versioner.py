@@ -84,8 +84,15 @@ def get_current_version(repo_path: Path) -> str:
     return DEFAULT_VERSION
 
 
+MAX_COMMITS_TO_ANALYZE = 500
+
+
 def get_commits_since_tag(repo_path: Path) -> list[str]:
-    """Get commit messages since the last tag."""
+    """Get commit messages since the last tag.
+
+    Limits to MAX_COMMITS_TO_ANALYZE to prevent unbounded git log on repos
+    with many commits since the last tag (or no tags at all).
+    """
     try:
         # Find last tag
         result = subprocess.run(
@@ -99,11 +106,14 @@ def get_commits_since_tag(repo_path: Path) -> list[str]:
             log_range = "HEAD"
 
         result = subprocess.run(
-            ["git", "log", log_range, "--pretty=format:%s"],
-            capture_output=True, text=True, cwd=repo_path,
+            ["git", "log", log_range, f"--max-count={MAX_COMMITS_TO_ANALYZE}",
+             "--pretty=format:%s"],
+            capture_output=True, text=True, cwd=repo_path, timeout=30,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()
+    except subprocess.TimeoutExpired:
+        pass
     except Exception:
         pass
 
@@ -188,6 +198,9 @@ def compute_next_version(repo_path: Path) -> VersionInfo:
 def apply_version(repo_path: Path, new_version: str) -> list[str]:
     """Update version in project files. Creates pyproject.toml if missing.
 
+    Creates backup files (.bak) before modifying, so the caller can roll back
+    if a subsequent step (e.g., publish) fails.
+
     Returns list of files modified/created.
     """
     modified: list[str] = []
@@ -196,6 +209,9 @@ def apply_version(repo_path: Path, new_version: str) -> list[str]:
     pyproject = path / "pyproject.toml"
     if pyproject.exists():
         text = pyproject.read_text()
+        # Back up before modification
+        (path / "pyproject.toml.bak").write_text(text)
+
         if re.search(r'version\s*=\s*"[^"]+"', text):
             # Update existing version field
             new_text = re.sub(
@@ -233,7 +249,9 @@ def apply_version(repo_path: Path, new_version: str) -> list[str]:
     if pkg.exists():
         import json
         try:
-            data = json.loads(pkg.read_text())
+            text = pkg.read_text()
+            (path / "package.json.bak").write_text(text)
+            data = json.loads(text)
             data["version"] = new_version
             pkg.write_text(json.dumps(data, indent=2) + "\n")
             modified.append("package.json")
@@ -241,6 +259,26 @@ def apply_version(repo_path: Path, new_version: str) -> list[str]:
             pass
 
     return modified
+
+
+def rollback_version(repo_path: Path) -> list[str]:
+    """Restore version files from backups created by apply_version.
+
+    Call this if a publish step fails after version was applied.
+    Returns list of files restored.
+    """
+    restored: list[str] = []
+    path = Path(repo_path)
+
+    for filename in ("pyproject.toml", "package.json"):
+        backup = path / f"{filename}.bak"
+        target = path / filename
+        if backup.exists():
+            target.write_text(backup.read_text())
+            backup.unlink()
+            restored.append(filename)
+
+    return restored
 
 
 def generate_changelog(info: VersionInfo) -> str:

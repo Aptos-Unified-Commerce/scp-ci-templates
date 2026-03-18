@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import yaml
@@ -17,6 +18,14 @@ from ci_agent.detect.project_type import (
 from ci_agent.detect.security import run_security_checks
 from ci_agent.detect.test_tools import detect_test_tool
 from ci_agent.models import BuildPlan
+
+logger = logging.getLogger(__name__)
+
+# Valid values for .ci-agent.yml fields
+VALID_REPO_ROLES = {"framework", "agent"}
+VALID_PROJECT_TYPES = {"python", "node", "go", "rust", "java", "unknown"}
+VALID_DEPLOY_TARGETS = {"codeartifact", "ecr"}
+VALID_SUGGESTED_WORKFLOWS = {"ci-framework", "ci-agent-service"}
 
 
 class Detector:
@@ -64,7 +73,11 @@ class Detector:
         )
 
     def _load_override(self) -> BuildPlan | None:
-        """Load .ci-agent.yml override file if present."""
+        """Load .ci-agent.yml override file if present.
+
+        Validates config values and logs warnings for invalid fields,
+        falling back to defaults for bad values rather than silently ignoring.
+        """
         config_file = self.repo_path / ".ci-agent.yml"
         if not config_file.exists():
             return None
@@ -72,14 +85,60 @@ class Detector:
         try:
             config = yaml.safe_load(config_file.read_text())
             if not isinstance(config, dict):
+                logger.warning(".ci-agent.yml is not a valid YAML dict — ignoring override")
                 return None
 
+            warnings: list[str] = []
+
+            # Validate known fields
+            repo_role = config.get("repo_role")
+            if repo_role and repo_role not in VALID_REPO_ROLES:
+                warnings.append(
+                    f"Invalid repo_role '{repo_role}' in .ci-agent.yml "
+                    f"(expected one of {VALID_REPO_ROLES}). Falling back to auto-detection."
+                )
+                repo_role = None
+
+            project_type = config.get("project_type")
+            if project_type and project_type not in VALID_PROJECT_TYPES:
+                warnings.append(
+                    f"Invalid project_type '{project_type}' in .ci-agent.yml "
+                    f"(expected one of {VALID_PROJECT_TYPES}). Falling back to 'python'."
+                )
+                project_type = "python"
+
+            suggested_workflow = config.get("suggested_workflow")
+            if suggested_workflow and suggested_workflow not in VALID_SUGGESTED_WORKFLOWS:
+                warnings.append(
+                    f"Invalid suggested_workflow '{suggested_workflow}' in .ci-agent.yml "
+                    f"(expected one of {VALID_SUGGESTED_WORKFLOWS}). Will auto-derive."
+                )
+                suggested_workflow = None
+
+            # Warn about unknown top-level keys
+            known_keys = {
+                "repo_role", "project_type", "frameworks", "test_tool",
+                "python_version", "node_version", "go_version",
+                "suggested_workflow", "dockerfile_path", "docker",
+            }
+            unknown_keys = set(config.keys()) - known_keys
+            if unknown_keys:
+                warnings.append(
+                    f"Unknown keys in .ci-agent.yml: {unknown_keys}. These will be ignored."
+                )
+
+            for w in warnings:
+                logger.warning(w)
+
             has_dockerfile = (self.repo_path / config.get("dockerfile_path", "Dockerfile")).exists()
-            repo_role = config.get("repo_role", "agent" if has_dockerfile else "framework")
+            if repo_role is None:
+                repo_role = "agent" if has_dockerfile else "framework"
+            if suggested_workflow is None:
+                suggested_workflow = "ci-agent-service" if repo_role == "agent" else "ci-framework"
 
             return BuildPlan(
                 repo_role=repo_role,
-                project_type=config.get("project_type", "python"),
+                project_type=project_type or "python",
                 frameworks=config.get("frameworks", []),
                 test_tool=config.get("test_tool"),
                 deploy_target="ecr" if repo_role == "agent" else "codeartifact",
@@ -87,12 +146,15 @@ class Detector:
                 python_version=config.get("python_version"),
                 node_version=config.get("node_version"),
                 go_version=config.get("go_version"),
-                security_warnings=[],
-                suggested_workflow=config.get("suggested_workflow",
-                    "ci-agent-service" if repo_role == "agent" else "ci-framework"),
+                security_warnings=warnings,
+                suggested_workflow=suggested_workflow,
                 confidence=1.0,
             )
-        except Exception:
+        except yaml.YAMLError as exc:
+            logger.error("Failed to parse .ci-agent.yml: %s — falling back to auto-detection", exc)
+            return None
+        except Exception as exc:
+            logger.error("Unexpected error loading .ci-agent.yml: %s", exc)
             return None
 
     def _calculate_confidence(
