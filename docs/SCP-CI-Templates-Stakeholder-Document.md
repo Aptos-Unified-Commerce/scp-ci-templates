@@ -22,6 +22,7 @@ The platform introduces an **AI-powered CI Agent** that autonomously detects pro
 | **Automated versioning** | No manual version bumps — conventional commits drive releases |
 | **Security by default** | 5 security tools run on every build, every repo |
 | **Standardized pipelines** | All repos follow the same patterns — easier auditing and compliance |
+| **Centralized Dockerfile** | One golden template for all agents — update once, all services get it |
 | **Build intelligence** | Historical analytics surface trends, flaky tests, and optimizations |
 
 ---
@@ -58,9 +59,11 @@ The platform classifies every repository into one of two roles:
 | Repo Type | What it is | Build | Publishes to |
 |-----------|-----------|-------|-------------|
 | **Framework** | Shared Python library (e.g., `scp-ai-platform`) | `uv build` → wheel + sdist | AWS CodeArtifact |
-| **Agent** | Python service with Dockerfile (e.g., `scp-agent-test-runner`) | `uv test` → `docker build` | AWS ECR |
+| **Agent** | Python service — no Dockerfile in repo (e.g., `scp-agent-test-runner`) | `uv test` → `docker build` | AWS ECR |
 
 **Auto-detection:** The CI Agent scans the repo and determines the role automatically — no manual configuration needed.
+
+**Centralized Dockerfile:** Agent repos do **not** contain a Dockerfile. The Dockerfile is centrally managed in `scp-ci-templates/dockerfiles/agent.Dockerfile` and injected at CI runtime. This means updating the base image, Python version, or security hardening in one place applies to **all** agent services instantly.
 
 ---
 
@@ -162,14 +165,60 @@ Test → [FAIL] → Diagnose → Apply healing strategy → Retry
 
 Each build gets **up to 2 healing attempts** before failing. Healed builds are tracked separately for analytics.
 
+### Phase 3.5: Dockerfile Generation (Agents Only)
+
+For agent repos, the Dockerfile is **not in the repo** — it is generated at CI runtime:
+
+```
+scp-ci-templates/dockerfiles/agent.Dockerfile    (golden template, centrally managed)
+        │
+        ▼  ci-agent docker-gen
+        │  reads .ci-agent.yml from the agent repo (if present)
+        │  auto-detects entrypoint from pyproject.toml + src/{pkg}/main.py
+        ▼
+   Generated Dockerfile    (in CI workspace, never committed)
+        │
+        ▼  docker build
+   Docker image → pushed to ECR
+```
+
+**What the golden template provides (all agents get this automatically):**
+- Multi-stage build (builder + runtime) for smaller images
+- Non-root user (`appuser`) for security
+- Built-in `HEALTHCHECK` on `/health`
+- `PIP_EXTRA_INDEX_URL` build arg for CodeArtifact framework dependencies
+- Optimized layer ordering (deps before source for better caching)
+
+**Per-repo customization via `.ci-agent.yml`** (no Dockerfile editing):
+
+```yaml
+docker:
+  python_version: "3.12"           # Base image (default: 3.11)
+  port: 9000                       # Exposed port (default: 8000)
+  entrypoint: '["gunicorn", "my_pkg.wsgi:app"]'  # Auto-detected if not set
+  extra_system_packages:           # Runtime apt packages
+    - libpq5
+    - ffmpeg
+  extra_build_packages:            # Build-time only apt packages
+    - gcc
+    - libpq-dev
+```
+
+If no `.ci-agent.yml` exists, the agent auto-detects everything from `pyproject.toml`.
+
+**Why this matters:**
+- Upgrade Python 3.11 → 3.12 for all agents → edit one file, push once
+- Add a security patch to every container → same
+- Developers never write or maintain Dockerfiles — they focus on application code
+
 ### Phase 4: Publish
 
 | Repo Type | What happens |
 |-----------|-------------|
 | **Framework** | `uv build` creates wheel + sdist → published to **AWS CodeArtifact** |
-| **Agent** | `docker build` creates image → tagged with SHA, branch, `latest` → pushed to **AWS ECR** |
+| **Agent** | Generated Dockerfile → `docker build` → tagged with SHA, branch, `latest` → pushed to **AWS ECR** |
 
-Agent Docker builds automatically receive CodeArtifact credentials as a build argument (`PIP_EXTRA_INDEX_URL`), allowing the Dockerfile to `pip install` framework libraries.
+Agent Docker builds receive CodeArtifact credentials as a build argument (`PIP_EXTRA_INDEX_URL`), so the golden Dockerfile can `pip install` framework libraries automatically.
 
 ### Phase 5: Version & Tag
 
@@ -233,22 +282,113 @@ scp-ci-templates/
 │
 ├── agent/                            # Python CI Agent package
 │   ├── src/ci_agent/
-│   │   ├── cli.py                    # CLI: 6 commands (detect, version, security, heal, analyze, record)
+│   │   ├── cli.py                    # CLI: 7 commands (detect, version, security, docker-gen, heal, analyze, record)
 │   │   ├── models.py                 # Data models (BuildPlan, HealingAction, etc.)
 │   │   ├── detect/                   # Auto-detection (5 modules)
 │   │   ├── heal/                     # Self-healing (3 modules, 10+ patterns)
 │   │   ├── analyze/                  # Build analytics (4 modules)
 │   │   ├── version/                  # Semantic versioning
 │   │   ├── security/                 # Security scan orchestrator (5 tools)
+│   │   ├── docker/                   # Dockerfile generator from golden template
 │   │   └── llm/                      # Optional Claude integration
-│   └── tests/                        # 46 unit tests (100% passing)
+│   └── tests/                        # 52 unit tests (100% passing)
 │
+├── dockerfiles/
+│   └── agent.Dockerfile              # Golden Dockerfile (centrally managed, injected at CI runtime)
+│
+├── templates/                        # Repo scaffolding templates
+│   ├── framework/                    # Library template (for create-repo.sh)
+│   └── agent/                        # Service template — no Dockerfile (for create-repo.sh)
+│
+├── create-repo.sh                    # CLI to scaffold new repos
+├── docs/                             # Stakeholder documentation
 ├── examples/
 │   ├── caller-library.yml            # Example for framework repos
 │   └── caller-service.yml            # Example for agent repos
 │
 └── README.md
 ```
+
+---
+
+## Local Development for Agent Repos
+
+Since agent repos don't contain a Dockerfile, developers use the CI Agent CLI to generate one locally when needed.
+
+### One-Time Setup
+
+```bash
+# Clone the templates repo (if not already)
+git clone git@github.com:Aptos-Unified-Commerce/scp-ci-templates.git ~/scp-ci-templates
+
+# Install the CI agent tool
+pip install ~/scp-ci-templates/agent
+```
+
+### Building a Local Docker Image
+
+From your agent repo directory:
+
+```bash
+# Generate the Dockerfile from the golden template
+ci-agent docker-gen \
+  --template ~/scp-ci-templates/dockerfiles/agent.Dockerfile \
+  --repo-path . \
+  --output Dockerfile
+
+# Build the image
+docker build -t my-agent:local .
+
+# Run it
+docker run -p 8000:8000 my-agent:local
+
+# Clean up the generated Dockerfile (don't commit it)
+rm Dockerfile
+```
+
+Or as a one-liner:
+
+```bash
+ci-agent docker-gen --template ~/scp-ci-templates/dockerfiles/agent.Dockerfile --repo-path . --output Dockerfile \
+  && docker build -t my-agent:local . \
+  && rm Dockerfile
+```
+
+### With CodeArtifact dependencies (if your agent uses framework libraries)
+
+```bash
+# Get CodeArtifact token
+export CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+  --domain my-domain --domain-owner 123456789012 \
+  --query authorizationToken --output text)
+
+export CODEARTIFACT_URL=$(aws codeartifact get-repository-endpoint \
+  --domain my-domain --domain-owner 123456789012 --repository my-repo \
+  --format pypi --query repositoryEndpoint --output text)
+
+# Generate and build with CodeArtifact index
+ci-agent docker-gen --template ~/scp-ci-templates/dockerfiles/agent.Dockerfile --repo-path . --output Dockerfile
+docker build \
+  --build-arg PIP_EXTRA_INDEX_URL="https://aws:${CODEARTIFACT_TOKEN}@${CODEARTIFACT_URL#https://}simple/" \
+  -t my-agent:local .
+rm Dockerfile
+```
+
+### Customizing the local build
+
+Create or edit `.ci-agent.yml` in your repo:
+
+```yaml
+docker:
+  python_version: "3.12"
+  port: 9000
+  extra_system_packages:
+    - libpq5
+```
+
+Then run `ci-agent docker-gen` — it picks up your config automatically.
+
+> **Note:** The generated Dockerfile should **never be committed** to the repo. It is always generated on-the-fly, both locally and in CI. This ensures all agents always use the latest golden template.
 
 ---
 
@@ -374,7 +514,7 @@ scp-ci-templates/
 | Security Scanning | pip-audit, bandit, trivy, hadolint, gitleaks |
 | AI Analysis | Claude API (optional) |
 | Agent Language | Python 3.11+ |
-| Test Framework | pytest (46 unit tests) |
+| Test Framework | pytest (52 unit tests) |
 
 ---
 
@@ -389,4 +529,4 @@ The SCP CI Templates platform transforms CI/CD from a per-repo configuration bur
 - **Build intelligence** — analytics, trends, optimization recommendations
 - **Optional AI insights** — Claude-powered failure analysis
 
-One template repo. One workflow file per caller. Zero manual version management. Security on every build.
+One template repo. One workflow file per caller. Zero manual version management. Zero Dockerfiles to maintain. Security on every build.
