@@ -237,6 +237,62 @@ def cmd_auto_issue(args: argparse.Namespace) -> None:
         _write_step_summary(summary)
 
 
+def cmd_dep_graph(args: argparse.Namespace) -> None:
+    """Register repo in the dependency graph or query it."""
+    from pathlib import Path
+
+    from ci_agent.deps.graph import DependencyGraph, register_repo
+
+    graph = DependencyGraph.load(args.graph_file)
+
+    if args.register:
+        graph = register_repo(
+            graph=graph,
+            repo_name=args.repo_name,
+            repo_role=args.repo_role,
+            version=args.version,
+            repo_path=Path(args.repo_path),
+        )
+        graph.save(args.graph_file)
+        print(f"Registered {args.repo_name} ({args.repo_role}) in dependency graph")
+
+    if args.query_cascade:
+        targets = graph.get_cascade_targets(args.query_cascade)
+        result = {"framework": args.query_cascade, "cascade_targets": targets}
+        print(json.dumps(result, indent=2))
+        _write_github_output("cascade-targets", ",".join(targets))
+        if targets:
+            _write_step_summary(
+                f"### Cascade Build Targets\n\n"
+                f"Framework `{args.query_cascade}` changed. These repos need rebuilding:\n"
+                + "\n".join(f"- `{t}`" for t in targets)
+            )
+
+    if args.show:
+        print(graph.to_json())
+        _write_step_summary(graph.to_markdown())
+
+
+def cmd_notify(args: argparse.Namespace) -> None:
+    """Send build notification to Slack/webhooks."""
+    from ci_agent.notify.sender import notify_build_result
+
+    results = notify_build_result(
+        status=args.status,
+        build_type=args.build_type,
+        failure_class=args.failure_class or "",
+        healing_strategy=args.healing_strategy or "",
+        duration=args.duration,
+        version=args.version or "",
+    )
+
+    print(json.dumps(results, indent=2))
+
+    if results:
+        channels = ", ".join(f"{k}: {'sent' if v else 'failed'}" for k, v in results.items())
+        _write_step_summary(f"### Notifications\n\n{channels}")
+
+
 def cmd_docker_gen(args: argparse.Namespace) -> None:
     """Generate Dockerfile from golden template + repo config."""
     from ci_agent.docker.generator import generate_dockerfile
@@ -325,6 +381,28 @@ def main() -> None:
     p_issue.add_argument("--history-file", default="build_history.json", help="Build history file")
     p_issue.add_argument("--min-occurrences", type=int, default=3, help="Min healing attempts to trigger issue")
     p_issue.set_defaults(func=cmd_auto_issue)
+
+    # dep-graph
+    p_deps = subparsers.add_parser("dep-graph", help="Manage the cross-repo dependency graph")
+    p_deps.add_argument("--graph-file", default="dep_graph.json", help="Path to the dependency graph file")
+    p_deps.add_argument("--repo-path", default=".", help="Path to the repo root")
+    p_deps.add_argument("--register", action="store_true", help="Register this repo in the graph")
+    p_deps.add_argument("--repo-name", default=os.environ.get("GITHUB_REPOSITORY", "").split("/")[-1] or "unknown", help="Repo name")
+    p_deps.add_argument("--repo-role", default="framework", help="Repo role (framework/agent)")
+    p_deps.add_argument("--version", default="0.0.0", help="Current repo version")
+    p_deps.add_argument("--query-cascade", default=None, help="Query cascade targets for a framework name")
+    p_deps.add_argument("--show", action="store_true", help="Show the full dependency graph")
+    p_deps.set_defaults(func=cmd_dep_graph)
+
+    # notify
+    p_notify = subparsers.add_parser("notify", help="Send build notification to Slack/webhooks")
+    p_notify.add_argument("--status", required=True, help="Build status (success/failure/healed)")
+    p_notify.add_argument("--build-type", default="unknown", help="Build type (framework/agent)")
+    p_notify.add_argument("--failure-class", default=None, help="Failure class (if failed)")
+    p_notify.add_argument("--healing-strategy", default=None, help="Healing strategy (if healed)")
+    p_notify.add_argument("--duration", type=float, default=0.0, help="Build duration in seconds")
+    p_notify.add_argument("--version", default=None, help="Published version (triggers deployment notification)")
+    p_notify.set_defaults(func=cmd_notify)
 
     # docker-gen
     p_docker = subparsers.add_parser("docker-gen", help="Generate Dockerfile from golden template")
