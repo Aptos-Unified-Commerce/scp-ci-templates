@@ -237,6 +237,39 @@ def cmd_auto_issue(args: argparse.Namespace) -> None:
         _write_step_summary(summary)
 
 
+def cmd_docs_gen(args: argparse.Namespace) -> None:
+    """Generate project documentation from build results and commit history."""
+    from ci_agent.docs.generator import generate_all_docs, write_docs
+
+    build_plan = None
+    if args.build_plan:
+        try:
+            build_plan = json.loads(args.build_plan)
+        except Exception:
+            pass
+
+    docs = generate_all_docs(
+        repo_path=args.repo_path,
+        build_plan=build_plan,
+        build_status=args.status,
+        test_count=args.test_count,
+        test_passed=args.test_passed,
+        coverage=args.coverage,
+    )
+
+    written = write_docs(args.repo_path, docs)
+
+    result = {"files_written": written, "docs_generated": list(docs.keys())}
+    print(json.dumps(result, indent=2))
+
+    _write_github_output("docs-generated", ",".join(docs.keys()))
+
+    summary = "### Documentation Generated\n\n"
+    for f in written:
+        summary += f"- `{f}`\n"
+    _write_step_summary(summary)
+
+
 def cmd_preflight(args: argparse.Namespace) -> None:
     """Run predictive pre-flight checks before the build."""
     from ci_agent.analyze.history import BuildHistory
@@ -475,6 +508,16 @@ def main() -> None:
     p_issue.add_argument("--history-file", default="build_history.json", help="Build history file")
     p_issue.add_argument("--min-occurrences", type=int, default=3, help="Min healing attempts to trigger issue")
     p_issue.set_defaults(func=cmd_auto_issue)
+
+    # docs-gen
+    p_docs = subparsers.add_parser("docs-gen", help="Generate project docs from build results")
+    p_docs.add_argument("--repo-path", default=".", help="Path to the repo root")
+    p_docs.add_argument("--build-plan", default=None, help="Build plan JSON string")
+    p_docs.add_argument("--status", default="passed", help="Build status (passed/failed)")
+    p_docs.add_argument("--test-count", type=int, default=0, help="Total test count")
+    p_docs.add_argument("--test-passed", type=int, default=0, help="Tests passed")
+    p_docs.add_argument("--coverage", type=float, default=0.0, help="Coverage percentage")
+    p_docs.set_defaults(func=cmd_docs_gen)
 
     # preflight
     p_preflight = subparsers.add_parser("preflight", help="Predictive pre-flight check before build")

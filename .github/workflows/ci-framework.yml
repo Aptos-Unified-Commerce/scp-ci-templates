@@ -222,6 +222,30 @@ jobs:
           name: ${{ inputs.package-name }}
           path: dist/
 
+      # ---- Generate project documentation ----
+      - name: Generate docs
+        if: always()
+        run: |
+          BUILD_PLAN='${{ steps.detect.outputs.build-plan || '{}' }}'
+          ci-agent docs-gen \
+            --repo-path . \
+            --build-plan "${BUILD_PLAN}" \
+            --status "${{ steps.status.outputs.status }}" \
+            --test-count 0 \
+            --test-passed 0 \
+            --coverage 0
+
+      - name: Commit docs
+        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "CI Agent"
+          git config user.email "ci-agent@scp-platform.noreply"
+          git add docs/ 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: auto-update build report, changelog, architecture [skip ci]"
+            git push origin main
+          fi
+
       - name: Check final result
         if: always()
         run: |
