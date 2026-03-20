@@ -237,6 +237,100 @@ def cmd_auto_issue(args: argparse.Namespace) -> None:
         _write_step_summary(summary)
 
 
+def cmd_preflight(args: argparse.Namespace) -> None:
+    """Run predictive pre-flight checks before the build."""
+    from ci_agent.analyze.history import BuildHistory
+    from ci_agent.predict.preflight import PreflightPredictor
+
+    records = []
+    if os.path.exists(args.history_file):
+        history = BuildHistory(history_file=args.history_file)
+        records = history.records
+
+    predictor = PreflightPredictor(records, repo_path=args.repo_path)
+    result = predictor.predict()
+
+    print(json.dumps(result.to_dict(), indent=2))
+
+    _write_github_output("risk-level", result.risk_level)
+    _write_github_output("risk-score", str(result.risk_score))
+    if result.predicted_failure:
+        _write_github_output("predicted-failure", result.predicted_failure)
+
+    _write_step_summary(result.to_markdown())
+
+    if args.fail_on_high and result.risk_level == "high":
+        print(f"\n::warning::Pre-flight check: HIGH risk ({result.risk_score:.0%})")
+
+
+def cmd_review_pr(args: argparse.Namespace) -> None:
+    """Review the current PR diff for issues."""
+    from ci_agent.review.pr_reviewer import PRReviewer, review_with_llm
+
+    reviewer = PRReviewer(repo_path=args.repo_path, base_ref=args.base_ref)
+    result = reviewer.review()
+
+    print(json.dumps(result.to_dict(), indent=2))
+
+    _write_github_output("review-approved", str(result.approved).lower())
+    _write_github_output("review-errors", str(sum(1 for f in result.findings if f.severity == "error")))
+    _write_github_output("review-warnings", str(sum(1 for f in result.findings if f.severity == "warning")))
+
+    summary = result.to_markdown()
+
+    # Optional LLM deep review
+    if args.llm_review:
+        diff = reviewer._get_diff()
+        if diff:
+            llm_review = review_with_llm(diff, result)
+            if llm_review:
+                summary += "\n\n### AI Deep Review\n\n" + llm_review
+
+    _write_step_summary(summary)
+
+    if args.fail_on_error and not result.approved:
+        sys.exit(1)
+
+
+def cmd_track_artifacts(args: argparse.Namespace) -> None:
+    """Track AI artifacts (prompts, model configs) alongside code version."""
+    from ci_agent.version.artifact_tracker import generate_manifest, has_artifacts_changed, load_manifest, save_manifest
+
+    manifest = generate_manifest(
+        repo_path=args.repo_path,
+        code_version=args.version,
+        commit_sha=os.environ.get("GITHUB_SHA", ""),
+    )
+
+    print(manifest.to_json())
+
+    _write_github_output("artifact-count", str(len(manifest.artifacts)))
+    _write_github_output("manifest-hash", manifest.manifest_hash)
+
+    # Check if artifacts changed since last manifest
+    if args.compare:
+        old = load_manifest(args.compare)
+        if old:
+            changed = has_artifacts_changed(old, manifest)
+            _write_github_output("artifacts-changed", str(changed).lower())
+            if changed:
+                _write_step_summary(
+                    "### AI Artifacts Changed\n\n"
+                    "Prompt or model config files changed since last build. "
+                    "Consider bumping the version.\n\n" + manifest.to_markdown()
+                )
+            else:
+                _write_step_summary("### AI Artifacts\n\nNo changes since last build.\n\n" + manifest.to_markdown())
+        else:
+            _write_step_summary(manifest.to_markdown())
+    else:
+        _write_step_summary(manifest.to_markdown())
+
+    if args.output:
+        save_manifest(manifest, args.output)
+        print(f"Manifest saved to {args.output}")
+
+
 def cmd_dep_graph(args: argparse.Namespace) -> None:
     """Register repo in the dependency graph or query it."""
     from pathlib import Path
@@ -381,6 +475,29 @@ def main() -> None:
     p_issue.add_argument("--history-file", default="build_history.json", help="Build history file")
     p_issue.add_argument("--min-occurrences", type=int, default=3, help="Min healing attempts to trigger issue")
     p_issue.set_defaults(func=cmd_auto_issue)
+
+    # preflight
+    p_preflight = subparsers.add_parser("preflight", help="Predictive pre-flight check before build")
+    p_preflight.add_argument("--repo-path", default=".", help="Path to the repo root")
+    p_preflight.add_argument("--history-file", default="build_history.json", help="Build history file")
+    p_preflight.add_argument("--fail-on-high", action="store_true", help="Warn if risk is high")
+    p_preflight.set_defaults(func=cmd_preflight)
+
+    # review-pr
+    p_review = subparsers.add_parser("review-pr", help="Review PR diff for issues")
+    p_review.add_argument("--repo-path", default=".", help="Path to the repo root")
+    p_review.add_argument("--base-ref", default="main", help="Base branch to diff against")
+    p_review.add_argument("--llm-review", action="store_true", help="Include LLM deep review")
+    p_review.add_argument("--fail-on-error", action="store_true", help="Exit non-zero if errors found")
+    p_review.set_defaults(func=cmd_review_pr)
+
+    # track-artifacts
+    p_artifacts = subparsers.add_parser("track-artifacts", help="Track AI artifacts (prompts, model configs)")
+    p_artifacts.add_argument("--repo-path", default=".", help="Path to the repo root")
+    p_artifacts.add_argument("--version", default="0.0.0", help="Current code version")
+    p_artifacts.add_argument("--output", default=None, help="Save manifest to this file")
+    p_artifacts.add_argument("--compare", default=None, help="Compare against previous manifest file")
+    p_artifacts.set_defaults(func=cmd_track_artifacts)
 
     # dep-graph
     p_deps = subparsers.add_parser("dep-graph", help="Manage the cross-repo dependency graph")
