@@ -297,7 +297,7 @@ scp-ci-templates/
 │   │   ├── security/                 # Security scan orchestrator (5 tools)
 │   │   ├── docker/                   # Dockerfile generator from golden template
 │   │   └── llm/                      # Optional Claude integration
-│   └── tests/                        # 52 unit tests (100% passing)
+│   └── tests/                        # 120 unit tests (100% passing)
 │
 ├── dockerfiles/
 │   └── agent.Dockerfile              # Golden Dockerfile (centrally managed, injected at CI runtime)
@@ -520,7 +520,7 @@ Then run `ci-agent docker-gen` — it picks up your config automatically.
 | Security Scanning | pip-audit, bandit, trivy, hadolint, gitleaks |
 | AI Analysis | Claude API (optional) |
 | Agent Language | Python 3.11+ |
-| Test Framework | pytest (52 unit tests) |
+| Test Framework | pytest (120 unit tests) |
 
 ---
 

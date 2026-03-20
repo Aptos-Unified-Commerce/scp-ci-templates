@@ -1,0 +1,34 @@
+# =============================================================================
+# SCP CI Templates — Dependencies
+#
+# This file lists ALL dependencies needed to:
+#   1. Run the CI Agent (detect, heal, version, security, docker-gen, etc.)
+#   2. Build and test repos using this platform
+#   3. Run security scans
+#
+# Install: pip install -r requirements.txt
+# =============================================================================
+
+# --- CI Agent core ---
+pyyaml>=6.0                    # Config parsing (.ci-agent.yml)
+requests>=2.31                 # Slack/webhook notifications, HTTP calls
+
+# --- Build tools (installed in CI runner) ---
+uv>=0.10.0                     # Python package manager (builds + dependency resolution)
+setuptools>=61.0               # Build backend for Python packages
+
+# --- Testing ---
+pytest>=8.0                    # Test runner
+pytest-cov>=5.0                # Coverage reporting
+pytest-mock>=3.14              # Mocking utilities
+
+# --- Security scanning tools ---
+pip-audit>=2.7.0,<3.0          # Python dependency vulnerability scanning (OSV database)
+bandit>=1.7.8,<2.0             # Python SAST (static application security testing)
+# trivy — installed via apt/binary, not pip (see ci-security.yml)
+# hadolint — installed via binary download, not pip (see ci-security.yml)
+# gitleaks — installed via binary download, not pip (see ci-security.yml)
+
+# --- Optional: AI-powered analysis ---
+# anthropic>=0.40.0            # Uncomment to enable Claude-powered failure investigation
+#                              # Requires ANTHROPIC_API_KEY environment variable

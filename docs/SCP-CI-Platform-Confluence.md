@@ -562,6 +562,148 @@ ci-agent notify --status success --version 0.3.0    # triggers deployment notifi
 
 ---
 
+## 10.7. Predictive Pre-Flight Checks
+
+Before running the full build, the CI Agent predicts whether this build is likely to fail and what the most probable failure would be.
+
+### How it works
+
+```
+Push → ci-agent preflight
+     → Checks 5 risk factors against build history
+     → Outputs: risk level (low/medium/high), risk score, predicted failure class
+     → Warns if risk is high (team can investigate before wasting CI time)
+```
+
+### Risk factors checked
+
+| Check | What it looks for | Risk signal |
+|-------|------------------|-------------|
+| **Branch health** | Failure rate on this branch in last 20 builds | >50% failure rate → high risk |
+| **Recurring failures** | Same failure class appearing 3+ times recently | Predicts the failure class |
+| **Dependency staleness** | `pyproject.toml` newer than lockfile by 7+ days | Stale deps → dependency conflict risk |
+| **Changeset size** | >20 files changed in last commit | Large changes → higher breakage risk |
+| **Changed files history** | Test files changed while tests have been failing | Likely to fail again |
+
+### Output example
+
+```
+Pre-Flight Check: 🔴 HIGH risk (72%)
+
+Most likely failure: dependency-conflict
+
+Warnings:
+- Branch `feature-auth` has 75% failure rate in last 4 builds
+- `dependency-conflict` has occurred 3 times in recent builds
+
+Suggestions:
+- Consider investigating existing failures on `feature-auth` before pushing more changes
+- Pre-emptive fix: address `dependency-conflict` root cause before building
+```
+
+### CLI
+
+```bash
+ci-agent preflight --repo-path . --history-file build_history.json
+ci-agent preflight --fail-on-high   # Warn in CI if risk is high
+```
+
+---
+
+## 10.8. PR Review Agent
+
+Analyzes pull request diffs for issues before merging. Runs as a heuristic check with optional LLM deep review.
+
+### What it checks
+
+| Category | What it finds | Severity |
+|----------|-------------|----------|
+| **Breaking changes** | Removed/renamed public functions or classes | Warning |
+| **Missing tests** | Source files changed but no test files modified | Warning |
+| **Security** | Hardcoded credentials, `eval()`, `exec()`, `pickle.load`, AWS keys, private keys, `shell=True` | Error |
+| **Dependencies** | Many new dependencies added (>3) | Info |
+| **Large files** | Files >1MB added to git | Warning |
+
+### Optional LLM deep review
+
+When `--llm-review` is passed and `ANTHROPIC_API_KEY` is set, Claude reviews the diff for:
+- Business logic bugs
+- Edge cases not handled
+- Error handling gaps
+- Performance concerns
+- API design issues
+
+### Output example
+
+```
+PR Review: ❌ CHANGES REQUESTED
+
+Found 1 error(s) and 1 warning(s) across 5 changed files.
+
+Errors (must fix):
+- [security] `config.py:12` — Possible hardcoded credential
+
+Warnings:
+- [missing-test] `src/auth/login.py` — 2 source file(s) changed but no test files modified
+```
+
+### CLI
+
+```bash
+ci-agent review-pr --repo-path . --base-ref main
+ci-agent review-pr --llm-review                    # Include AI deep review
+ci-agent review-pr --fail-on-error                 # Exit non-zero if errors found
+```
+
+---
+
+## 10.9. AI Artifact Tracking (Prompts & Model Configs)
+
+For AI-powered services, the platform tracks prompt templates and model configurations alongside code versions.
+
+### What it tracks
+
+| Artifact type | File patterns scanned |
+|--------------|----------------------|
+| **Prompts** | `prompts/**/*.txt`, `prompts/**/*.prompt`, `**/*prompt*.yaml` |
+| **Model configs** | `**/model_config.yaml`, `**/llm_config.json`, `config/models/**` |
+| **Embedding configs** | `**/embedding_config.yaml`, `**/vector_config.yaml` |
+
+### How it works
+
+1. `ci-agent track-artifacts` scans the repo for AI artifact files
+2. Each file is SHA-256 hashed
+3. A versioned manifest is generated: code version + artifact hashes + combined manifest hash
+4. On subsequent builds, the manifest is compared — if any prompt/model config changed, it's flagged
+
+### Why this matters
+
+When a production agent misbehaves, you need to answer: "Which prompt version was deployed with code v0.3.0?" The artifact manifest links code version → prompt hash → exact prompt content.
+
+### Output example
+
+```
+AI Artifact Manifest
+
+Code version: 0.3.0
+Manifest hash: a1b2c3d4e5f6
+
+| Artifact | Type | Hash | Size |
+|----------|------|------|------|
+| prompts/system.txt | prompt | 7f8a9b0c1d2e | 1.2KB |
+| prompts/summarize.prompt | prompt | 3e4f5a6b7c8d | 0.8KB |
+| model_config.yaml | model-config | 9a0b1c2d3e4f | 0.3KB |
+```
+
+### CLI
+
+```bash
+ci-agent track-artifacts --repo-path . --version 0.3.0 --output manifest.json
+ci-agent track-artifacts --compare old-manifest.json    # Detect changes
+```
+
+---
+
 ## 11. Creating New Repos — The Scaffolder
 
 Teams create new repos using the `create-repo.sh` CLI:
@@ -700,6 +842,10 @@ pip install ./agent
 | `ci-agent docker-gen` | Generates Dockerfile from golden template + repo config | Agent builds only |
 | `ci-agent heal` | Reads build log + history, picks best strategy, prescribes fix | On build failure |
 | `ci-agent auto-issue` | Checks history for recurring failures, creates GitHub issues | After every build |
+| `ci-agent preflight` | Predicts failure risk before running the build | Start of every build |
+| `ci-agent review-pr` | Reviews PR diff for breaking changes, security, missing tests | On pull requests |
+| `ci-agent review-pr --llm-review` | Adds Claude deep review for logic/edge-case bugs | On pull requests |
+| `ci-agent track-artifacts` | Tracks prompt templates and model configs with content hashes | During build |
 | `ci-agent dep-graph` | Register repo in dependency graph, query cascade targets | During build |
 | `ci-agent notify` | Send build event to Slack/webhooks | After build completes |
 | `ci-agent analyze` | Reads build history, generates insights + recommendations | On demand or scheduled |
@@ -721,18 +867,20 @@ scp-ci-templates/
 │
 ├── agent/                            CI Agent Python package
 │   ├── src/ci_agent/
-│   │   ├── cli.py                   12 CLI commands
+│   │   ├── cli.py                   15 CLI commands
 │   │   ├── models.py               Data models (BuildPlan, HealingAction, etc.)
 │   │   ├── detect/                  Repo detection (6 modules)
 │   │   ├── heal/                    Smart healing (5 modules: healer, strategies, scorer, issue_creator, pr_creator)
 │   │   ├── analyze/                 Build analytics (4 modules)
-│   │   ├── version/                 Semantic versioning
+│   │   ├── version/                 Semantic versioning + AI artifact tracking
 │   │   ├── security/                Security scan orchestrator
 │   │   ├── docker/                  Dockerfile generator
+│   │   ├── predict/                 Predictive pre-flight checks
+│   │   ├── review/                  PR review agent (heuristic + LLM)
 │   │   ├── deps/                    Dependency graph (cascade builds)
 │   │   ├── notify/                  Slack + webhook notifications
 │   │   └── llm/                     Agentic Claude investigation (6 tools, multi-turn)
-│   └── tests/                       97 unit tests
+│   └── tests/                       120 unit tests
 │
 ├── dockerfiles/
 │   └── agent.Dockerfile             Golden Dockerfile template (centrally managed)
@@ -910,6 +1058,9 @@ Typical build: ~3–5 min. At 20 pushes/day across 10 repos → ~1,000–1,500 m
 | **Security** | 5 tools (pip-audit, bandit, trivy, hadolint, gitleaks) → unified report → optional deployment gate |
 | **Agentic LLM** | Claude investigates failures with 6 tools (read_file, git_blame, search_code, etc.) in multi-turn loops |
 | **Dependency graph** | Maps framework→agent dependencies, cascade target detection, transitive walking |
+| **Predictive pre-flight** | 5 risk factors checked before build → risk level + predicted failure class |
+| **PR review agent** | Heuristic + optional LLM review of diffs for breaking changes, security, missing tests |
+| **AI artifact tracking** | SHA-256 hashes prompts/model configs → versioned manifest → detect changes between builds |
 | **Notifications** | Slack webhooks + generic webhooks for failures, healed builds, deployments |
 | **Analytics** | Build history tracked → failure trends, flaky tests, optimization suggestions |
 | **Repo scaffolding** | `create-repo.sh framework/agent` generates a ready-to-go repo with CI pre-configured |
