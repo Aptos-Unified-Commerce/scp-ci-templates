@@ -167,15 +167,20 @@ The Dockerfile is never in the agent repo — it is generated at runtime from th
 
 When a build step fails, the CI Agent reads the build log, classifies the failure, and applies a targeted fix before retrying.
 
-### How it works
+### How it works (closed-loop)
 
 ```
-Step fails → ci-agent heal reads the log
+Step fails → ci-agent heal reads the log + build history
            → Matches against 15+ known failure patterns
-           → Returns: what failed, what to do, retry commands
+           → Scores strategies by historical success rate (Laplace-smoothed)
+           → Picks the most effective strategy (not just first match)
+           → If default strategy has <25% success rate, tries an alternative
            → Pipeline applies the fix and retries
            → Up to 2 retry attempts per build
+           → Result (healed/failed) feeds back into scoring for next build
 ```
+
+The system learns over time — strategies that consistently fail are deprioritized, and better alternatives are tried first.
 
 ### Known failure patterns
 
@@ -204,6 +209,42 @@ Every healing action is recorded in build history:
 - Which strategy was applied
 - Whether the retry succeeded
 - The analytics module later reports which strategies are effective and which indicate a permanent issue
+
+### Auto-Issue Creation
+
+When the same failure hits **3+ times** with a healing success rate below **50%**, the CI Agent automatically creates a GitHub issue:
+
+- **Title:** `Recurring CI failure: {failure_class} (5 attempts, 20% heal rate)`
+- **Body:** Full context — failure class, strategies tried, affected branches, link to build run
+- **Label:** `ci-recurring-failure`
+- **Deduplication:** Won't create duplicates — checks for existing open issues first
+- **Action:** Team investigates root cause and applies a permanent fix
+
+---
+
+## 6.5. Agentic LLM Investigation (Optional)
+
+When `ANTHROPIC_API_KEY` is configured, failure analysis upgrades from a one-shot log dump to a **multi-turn agentic investigation**:
+
+```
+Build fails → Claude receives the log
+            → Claude uses tools to investigate:
+              - read_file: inspect source code at the failing line
+              - git_blame: find who last changed the failing code
+              - git_log_recent: see what changed recently
+              - search_code: find related imports, usages
+              - query_build_history: check if this failed before
+              - list_files: understand project structure
+            → Claude reasons across 2-5 turns
+            → Produces: root cause, specific fix, prevention steps
+```
+
+**Example investigation:**
+1. Claude reads the log → "test_auth.py:45 fails with ImportError for `get_token`"
+2. Claude reads `test_auth.py` → sees it imports from `scp_ai_platform.auth`
+3. Claude runs `search_code("scp_ai_platform.auth")` → module doesn't exist
+4. Claude checks `git_log_recent` → "commit 2 hours ago renamed auth module to identity"
+5. Claude outputs: "Root cause: `scp_ai_platform.auth` was renamed to `scp_ai_platform.identity` in commit abc123. Fix: update import in test_auth.py:3"
 
 ---
 
@@ -436,6 +477,91 @@ Build history is stored as a JSON file (last 200 records per repo, partitioned b
 
 ---
 
+## 10.5. Dependency Graph — Cross-Repo Awareness
+
+The platform maintains a dependency graph that maps which agents depend on which frameworks.
+
+### What it tracks
+
+```
+scp-ai-platform (framework v0.2.0)
+   ├── scp-agent-orders (agent v0.3.0)
+   ├── scp-agent-runner (agent v0.1.0)
+   └── scp-agent-payments (agent v0.2.0)
+
+scp-common-utils (framework v0.1.0)
+   └── scp-agent-orders (agent v0.3.0)
+```
+
+### How it works
+
+1. During each build, `ci-agent dep-graph --register` records the repo's name, role, version, and internal dependencies
+2. Dependencies are extracted by scanning `pyproject.toml` and `requirements.txt` for known internal package names
+3. The graph is stored as a JSON file in the CI cache
+
+### Cascade builds
+
+When a framework publishes a new version, query which agents need rebuilding:
+
+```bash
+ci-agent dep-graph --query-cascade scp-ai-platform
+# Output: scp-agent-orders, scp-agent-runner, scp-agent-payments
+```
+
+Includes transitive dependencies — if framework A depends on framework B, changing B triggers rebuilds of A and all of A's dependents.
+
+### CLI commands
+
+```bash
+ci-agent dep-graph --register --repo-name scp-agent-orders --repo-role agent --version 0.3.0
+ci-agent dep-graph --query-cascade scp-ai-platform
+ci-agent dep-graph --show
+```
+
+---
+
+## 10.6. Notifications — Slack & Webhooks
+
+Build events are pushed to external channels so teams don't have to watch GitHub Actions.
+
+### Supported channels
+
+| Channel | Config | When it sends |
+|---------|--------|--------------|
+| **Slack** | Set `SLACK_WEBHOOK_URL` env var or secret | Failures, healed builds, deployments |
+| **Generic webhook** | Set `NOTIFY_WEBHOOK_URL` env var or secret | Same (POST JSON to any URL) |
+
+### What gets notified
+
+| Event | Notification? | Color |
+|-------|--------------|-------|
+| Build success (no version) | **No** (too noisy) | — |
+| Build failure | **Yes** | Red |
+| Build healed | **Yes** | Goldenrod |
+| Recurring failure (auto-issue) | **Yes** | Bright red |
+| Deployment (version published) | **Yes** | Blue |
+
+### Slack message format
+
+```
+:x: Build Failure
+Build failed on `main` (abc1234) — `dependency-conflict`
+
+Repository: scp-agent-orders
+Branch: main
+Failure Class: dependency-conflict
+Duration: 87s
+```
+
+### CLI
+
+```bash
+ci-agent notify --status failure --build-type agent --failure-class dependency-conflict
+ci-agent notify --status success --version 0.3.0    # triggers deployment notification
+```
+
+---
+
 ## 11. Creating New Repos — The Scaffolder
 
 Teams create new repos using the `create-repo.sh` CLI:
@@ -572,7 +698,10 @@ pip install ./agent
 | `ci-agent security` | Runs all available security tools, outputs unified report | Every build (parallel) |
 | `ci-agent security --fail-on-high` | Same, but exits non-zero on critical/high findings | When gating is enabled |
 | `ci-agent docker-gen` | Generates Dockerfile from golden template + repo config | Agent builds only |
-| `ci-agent heal` | Reads build log, classifies failure, prescribes fix | On build failure |
+| `ci-agent heal` | Reads build log + history, picks best strategy, prescribes fix | On build failure |
+| `ci-agent auto-issue` | Checks history for recurring failures, creates GitHub issues | After every build |
+| `ci-agent dep-graph` | Register repo in dependency graph, query cascade targets | During build |
+| `ci-agent notify` | Send build event to Slack/webhooks | After build completes |
 | `ci-agent analyze` | Reads build history, generates insights + recommendations | On demand or scheduled |
 | `ci-agent record` | Records a build result to history file | End of every build |
 
@@ -592,16 +721,18 @@ scp-ci-templates/
 │
 ├── agent/                            CI Agent Python package
 │   ├── src/ci_agent/
-│   │   ├── cli.py                   7 CLI commands
+│   │   ├── cli.py                   12 CLI commands
 │   │   ├── models.py               Data models (BuildPlan, HealingAction, etc.)
 │   │   ├── detect/                  Repo detection (6 modules)
-│   │   ├── heal/                    Self-healing (3 modules, 15+ patterns)
+│   │   ├── heal/                    Smart healing (5 modules: healer, strategies, scorer, issue_creator, pr_creator)
 │   │   ├── analyze/                 Build analytics (4 modules)
 │   │   ├── version/                 Semantic versioning
 │   │   ├── security/                Security scan orchestrator
 │   │   ├── docker/                  Dockerfile generator
-│   │   └── llm/                     Optional Claude integration
-│   └── tests/                       52 unit tests
+│   │   ├── deps/                    Dependency graph (cascade builds)
+│   │   ├── notify/                  Slack + webhook notifications
+│   │   └── llm/                     Agentic Claude investigation (6 tools, multi-turn)
+│   └── tests/                       97 unit tests
 │
 ├── dockerfiles/
 │   └── agent.Dockerfile             Golden Dockerfile template (centrally managed)
@@ -773,10 +904,13 @@ Typical build: ~3–5 min. At 20 pushes/day across 10 repos → ~1,000–1,500 m
 | **Framework build** | `uv sync` → `pytest` → `uv build` → publish to CodeArtifact |
 | **Agent build** | `uv sync` → `pytest` → generate Dockerfile from golden template → `docker build` → push to ECR |
 | **Centralized Dockerfile** | Golden template in scp-ci-templates → generated at runtime → never in agent repos |
-| **Self-healing** | 15+ failure patterns detected from logs → targeted fix applied → retry (up to 2x) |
+| **Self-healing** | 15+ failure patterns, closed-loop scoring, deprioritizes ineffective strategies |
+| **Auto-issue creation** | Recurring failures (3+ times, <50% heal rate) → auto-creates GitHub issue |
 | **Versioning** | Conventional commits → auto-bump pyproject.toml → git tag → always in sync |
 | **Security** | 5 tools (pip-audit, bandit, trivy, hadolint, gitleaks) → unified report → optional deployment gate |
+| **Agentic LLM** | Claude investigates failures with 6 tools (read_file, git_blame, search_code, etc.) in multi-turn loops |
+| **Dependency graph** | Maps framework→agent dependencies, cascade target detection, transitive walking |
+| **Notifications** | Slack webhooks + generic webhooks for failures, healed builds, deployments |
 | **Analytics** | Build history tracked → failure trends, flaky tests, optimization suggestions |
-| **AI analysis** | Optional Claude integration for root cause analysis on complex failures |
 | **Repo scaffolding** | `create-repo.sh framework/agent` generates a ready-to-go repo with CI pre-configured |
 | **Publishing** | Frameworks → CodeArtifact (Python packages), Agents → ECR (Docker images) |
